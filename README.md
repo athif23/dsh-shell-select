@@ -20,7 +20,7 @@ adapters, and hands everything else to the harness:
 | Which platform we are on | `ctx.subprocess.terminalEnvironment()` → `{platform, defaultShell}` | nothing |
 | PowerShell install locations | `candidatePwshPaths` exported by `@deepseek-ai/dsh-pwsh-local` | nothing |
 | Process mechanics: deadlines, bounded and spilled output, background handles, process-tree termination | `PwshLocalExecutor` on Windows, `LocalBashExecutor` elsewhere, inherited whole | nothing |
-| Sandbox enforcement | `ctx.sandbox.confine` | nothing |
+| Sandbox enforcement | `ctx.sandbox.confine` | nothing — including for the settings card's version probes |
 | Background job registry | `ctx.jobs` | nothing |
 | Settings persistence and the Web settings surface | `ctx.settings.installSection` + the `settings.plugin.item` slot | the `shell-select` namespace and its card |
 | Escalation approval | `approveEscalation` from `@deepseek-ai/dsh-sandbox` | nothing |
@@ -28,7 +28,16 @@ adapters, and hands everything else to the harness:
 
 The one thing it *replaces* is the `ctx.shell` provider, because a selector has
 to decide argv before the platform executor does. `resolve()` still calls the
-inherited defaulting; only `argv` and the refusal gate are new.
+inherited defaulting; only the argv, the decision, and the refusal gate are new.
+
+**One decision per call.** Each call — foreground or background — is decided
+once: a frozen settings snapshot, the entry, the executable, the validated
+working directory, the launch options, and the argv. The decision is what
+refuses an unusable selection (before confinement and before any process
+exists), what `run`/`start` spawn, and what the transcript records as the shell
+that ran. A settings write that lands mid-call therefore changes the *next* call,
+never the one in flight, and the recorded facts cannot drift from the process
+they describe.
 
 ## The verified compatibility matrix
 
@@ -36,13 +45,18 @@ Measured against DSH `0.1.6-alpha.1` on Windows 10.0.26200 with Node v24.15.0, b
 running each shell through `ctx.sandbox.confine` into the shipped `windows-acl`
 runner and then attempting one write inside the workspace and one outside it.
 
-| Shell (Windows) | `danger-full-access` | `workspace-write` | `read-only` |
-|---|---|---|---|
-| PowerShell 7 (`pwsh`) | runs | runs, confined | runs, confined |
-| Windows PowerShell 5.1 | runs | runs, confined; outside writes denied | runs, confined; all writes denied |
-| `cmd.exe` | runs | runs, confined; outside writes denied | runs, confined; all writes denied |
-| Git Bash | runs | **cannot start** | **cannot start** |
-| WSL Bash | runs | **cannot start** | **cannot start** |
+| Shell (Windows) | Installed on the development host? | `danger-full-access` | `workspace-write` | `read-only` |
+|---|---|---|---|---|
+| PowerShell 7 (`pwsh`) | **no** — skipped, not installed | not run here | not run here | not run here |
+| Windows PowerShell 5.1 | yes | runs | runs, confined; outside writes denied | runs, confined; all writes denied |
+| `cmd.exe` | yes | runs | runs, confined; outside writes denied | runs, confined; all writes denied |
+| Git Bash | yes | runs | **cannot start** | **cannot start** |
+| WSL Bash (Ubuntu 22.04) | yes | runs | **cannot start** | **cannot start** |
+
+The `pwsh` row is the one entry this machine could not exercise: PowerShell 7 is
+not installed here, so its integration case skips with that reason and the tested
+behavior for the PowerShell dialect is Windows PowerShell 5.1's. The row is kept
+because the catalog supports it and a host that has it runs the same code path.
 
 The two failures are the operating system refusing, not this plugin:
 
@@ -64,47 +78,67 @@ guarantee, and this plugin adds no destructive-command detection.
 ## What was tested, and what remains unverified
 
 Stated plainly, because a compatibility claim you cannot check is worse than no
-claim.
+claim. Every number below is from a run of `pnpm test` in this repository.
 
-**Tested by the author, on Windows 10.0.26200 against DSH `0.1.6-alpha.1`:**
+**Tested by the author, on Windows 10.0.26200 against DSH `0.1.6-alpha.1`:** 205
+tests, 204 passing, 1 skipped (`pwsh` is not installed here).
 
-- Every catalog entry's argv, end to end, for `cmd`, PowerShell 5.1, and Git
-  Bash and WSL through the real providers — 132 tests, 130 passing, 2 skipped.
+- Every catalog entry's argv, end to end, for `cmd`, Windows PowerShell 5.1, Git
+  Bash, and WSL (Ubuntu 22.04) through the real subprocess and sandbox providers.
 - Real confinement: a workspace write succeeds and a sibling-directory write is
-  denied, for `cmd` and PowerShell; `read-only` denies both.
-- Real refusals: Git Bash and WSL are refused under `workspace-write` and
-  `read-only` before any process is spawned, and run under `danger-full-access`.
+  denied, for `cmd` and PowerShell; `read-only` denies both. Git Bash and WSL are
+  refused under `workspace-write` and `read-only` before any process is spawned,
+  and run under `danger-full-access`.
 - Timeout, caller cancellation, background read/kill, spaces and Unicode in the
-  working directory, settings persistence across a restart, and the two host
-  routes including their loopback restriction.
+  working directory, a missing working directory, settings persistence across a
+  restart, and the two host routes including their loopback restriction.
+- One decision per call: the argv, executable, and facts of a call do not move
+  when the settings are rewritten mid-call, and concurrent selection refreshes
+  settle as the newest answer.
+- Two Windows-host races the decision exists for, both driven deterministically
+  by a delayed resolution stub rather than by timing luck.
+- The version probe going through `ctx.sandbox.confine` like any other command,
+  and a row whose mode cannot confine its shell being reported as *not probed*
+  rather than started unconfined.
 - The `shell` tool and its global guard mount cleanly inside a real DSH web
   composition (isolated `DSH_HOME`), and the Web card's bundle is discovered,
   placed in the boot graph, and served.
 
 **Verified as logic on any host, both platforms:** the catalogs, the dialect
-builders, the resolution walk, the per-platform working-directory rule, the
-confinement verdicts, and the `auto` selection. `test/platform-lanes.spec.mjs`
-asserts this coverage so it cannot silently regress.
+builders, the resolution walk, the identity guard, the per-platform
+working-directory rule, the confinement verdicts, the `auto` selection, and the
+lane definitions. `test/platform-lanes.spec.mjs` asserts this coverage so it
+cannot silently regress.
 
 **Not verified — read this before relying on it:**
 
-- **The POSIX lane has only ever been spawned in CI.** The plugin was developed
-  on Windows, so no local run has executed `bash`, `zsh`, `fish`, or `sh`. The
-  CI matrix runs the integration suite on `ubuntu-latest` and `macos-latest`,
-  which is where that lane is actually exercised — check the latest run before
-  trusting it, and treat the POSIX rows as unobserved if CI is red or the
-  workflow has not run. The POSIX catalog, argv, resolution order, and platform
-  rules are additionally exercised as pure functions on every runner.
-- **POSIX confinement is unclaimed.** The catalog marks POSIX entries
-  confineable because the harness's POSIX backends (bwrap, Landlock, Seatbelt)
-  wrap argv and are indifferent to which shell is inside — that is the harness's
-  documented behavior, not a measurement made here. The status payload reports
-  `confinementVerified: false` on POSIX, and the card shows a warning.
-- **`auto` on POSIX has not been observed.** The rule is: a `$SHELL` naming a
-  catalog entry wins when that entry is installed, otherwise the first entry
-  that resolves (bash, then zsh, sh, fish, pwsh). The `$SHELL` half reads the
-  harness's own `terminalEnvironment`; the outcome on a given Linux or macOS
-  host is exercised only by the CI matrix, not locally.
+- **The POSIX lane has only ever been spawned in CI.** The plugin is developed on
+  Windows, so no local run has executed `bash`, `zsh`, `fish`, or `sh` as the
+  *host* shell. `test/integration.spec.mjs` writes that lane in full — required
+  shell, spaces and Unicode in the working directory, real confinement with a
+  refusal fallback, timeout, cancellation, and the background cycle — and CI runs
+  it on `ubuntu-latest` and `macos-latest`. Check the latest run before trusting
+  it: if CI is red or the workflow has not run, the POSIX rows are unobserved.
+  `lanes.mjs` fixes which shells a lane must cover, and a required shell may not
+  skip on its own platform.
+- **POSIX confinement is unclaimed.** The catalog marks POSIX entries confineable
+  because the harness's POSIX backends (bwrap, Landlock, Seatbelt) wrap argv and
+  are indifferent to which shell is inside — the harness's documented behavior,
+  not a measurement made here. The integration lane asserts the *file* outcome
+  (the escape write is denied) and that a host without a backend refuses instead
+  of running unconfined; it does not assert the POSIX denial signature, which is
+  each backend's own. The status payload reports `confinementVerified: false` on
+  POSIX, and the card says so.
+- **POSIX shell semantics were observed, not executed through the plugin.** `dash`'s
+  lack of `--version` (exit 2, message on stderr) and `sh -c 'echo "$0"'`
+  answering with the implementation's own name were measured directly under WSL
+  Ubuntu 22.04, which is why the `sh` entry asks for its interpreter instead of a
+  version. The plugin's own POSIX lane was not run against `dash`.
+- **`auto` on POSIX has not been observed locally.** The rule is: a `$SHELL`
+  naming a catalog entry wins when that entry is installed, otherwise the first
+  entry that resolves (bash, then zsh, sh, fish, pwsh). The `$SHELL` half reads
+  the harness's own `terminalEnvironment`; the outcome on a given Linux or macOS
+  host is exercised only by the CI matrix.
 - **Remote execution worlds are unexercised.** Resolution goes through
   `ctx.subprocess`, so an SSH or hosted provider should resolve against its own
   filesystem, but no such provider was available to test. Working-directory
@@ -116,9 +150,9 @@ asserts this coverage so it cannot silently regress.
   through a .NET-level preamble; cmd has no equivalent, and the plugin
   deliberately does **not** run `chcp` — that mutates the code page of the
   console the child shares with the host. Unicode *paths and filenames* work.
-- **`sh`, `fish`, and `zsh` have not been run at all**, on any platform. Their
-  entries are catalog rows with dialect `bash`; fish's non-POSIX syntax is
-  documented for the model but not exercised.
+- **`fish` and `zsh` have not been run at all**, on any platform. Their entries
+  are catalog rows with dialect `bash`; fish's non-POSIX syntax is documented for
+  the model but not exercised. `sh` is run by CI's POSIX lane when installed.
 - **The Web card has not been rendered in a browser.** Its bundle, module-loader
   contract, slot key, copy, and data flow are tested against stand-ins for React
   and the slot registry; no browser has drawn it.
@@ -198,15 +232,16 @@ One namespace in `~/.dsh/settings.yaml`, editable from the Web settings card
 | Field | Meaning |
 |---|---|
 | `shell` | A catalog id, or `auto` (the default). `auto` picks the first catalog entry that resolves, so installing the plugin does not change which shell an agent gets: PowerShell leads the Windows catalog because that is what the harness's Windows executor runs, and bash leads the POSIX catalog for the same reason. On POSIX a `$SHELL` that names a catalog entry wins, since there it is a real user preference. |
-| `executable` | Optional explicit path. Wins over discovery; a value that cannot be resolved is an error, never a cue to discover instead. |
+| `executable` | Optional explicit path for the selected shell. Wins over discovery; a value that cannot be resolved, or that names a *different* shell, is an error — never a cue to discover instead and never a cue to reuse it for another shell's launch arguments. |
 | `loginShell` | Run a bash-family shell with `-l`. Off by default. |
 | `wslDistro`, `wslMountRoot` | WSL distribution name and where it mounts Windows drives (default `/mnt`). |
 | `enableRunInBackground` | Advertise `run_in_background` (default true). |
 | `timeoutMs`, `maxTimeoutMs`, `maxOutputBytes`, `maxSpillBytes`, `graceMs`, `cwd` | The inherited executor budgets. |
 | `pwshPath` | The inherited `shell` namespace's PowerShell executable. Still honored for the PowerShell entries, so an existing setting keeps working. |
 
-A settings change applies to subsequent calls. It never alters a spec that was
-already resolved, and never alters a running process.
+A settings change applies to subsequent calls. It never alters a call that is
+already being prepared, never alters a running process, and never alters the
+facts a finished call recorded.
 
 ## The settings card
 
@@ -223,10 +258,13 @@ Opening it shows:
 - a **dropdown** listing every shell in the platform's catalog, each option
   carrying its own reported version, so an uninstalled shell reads as *not
   found* rather than disappearing from the list. **Automatic**, the default, is
-  the first option and says which shell it currently resolves to;
+  the first option, says which shell it currently resolves to, and is always
+  selectable — so a user who picked a specific shell can go back;
 - the selected shell's facts as **separate statements rather than one status
-  word** — detected path, version, whether it can be confined, the permission
-  mode in force, and whether it is usable under that mode — plus the measured
+  word**: detected path, version (or, for a shell with no version flag, the
+  interpreter its own `$0` names), what the catalog *expects* the sandbox to be
+  able to do, what this machine was *observed* doing, the permission mode in
+  force, and whether the shell is usable under that mode — plus the measured
   refusal reason when it cannot be;
 - the **executable path**, the **login-shell** toggle, and the WSL **distribution**
   and **mount root**, each shown only for the shells they apply to.
@@ -235,15 +273,28 @@ Opening it shows:
 shell, typing a path, or ticking a box changes nothing until you press **Save**,
 and **Discard** drops the lot. A save goes out as **one revision-fenced
 mutation**, so it lands whole or not at all, and the card collapses only after it
-does — a rejected write keeps its diagnostics and your edits in place.
+does — a rejected write keeps its diagnostics, the host's own message, and your
+edits in place.
+
+Changing the shell **clears a staged executable override**, and says so at the
+field: that path was given for the shell you are leaving, and carrying it over
+would either fail the host's identity check or pair one shell's binary with
+another's launch arguments. Type it again after the switch if it still applies.
 
 Because the facts follow the *staged* selection, you can see what a shell would
-resolve to before committing to it. What the numbers cannot yet reflect is the
-staged path itself, so **Test shell** says so while edits are outstanding: it
-runs the *saved* selection. The test runs `echo DSH-SHELL-SELECT-TEST-OK`, a
-module constant with no input, through the same resolve/run path a model call
-takes — so it reports the same refusal a model call would get, and never
-demonstrates a capability the tool itself would not grant.
+resolve to before committing to it. **Test shell** runs the *saved* selection —
+a module constant (`echo DSH-SHELL-SELECT-TEST-OK`) with no input, through the
+same decide/run path a model call takes, so it reports the same refusal a model
+call would get and never demonstrates a capability the tool itself would not
+grant. A result is dropped, with a note, once a save changes the shell it
+described.
+
+Version probes are the one place the card runs something, and they run the same
+way a command does: fixed plugin-owned arguments, through `ctx.sandbox.confine`
+under the deployment's own policy. A shell the current mode cannot confine is
+reported as **not probed** — never started unconfined — and a probe that exits
+non-zero is a failure even when it printed something, so `dash`'s "Illegal
+option" on `--version` is reported as the error it is rather than as a version.
 
 The card also **blocks a save the Host would refuse** — a relative path carrying
 a separator, a mount root that is not a Linux path, a login flag on a shell that
@@ -258,9 +309,8 @@ deployment the worst a local peer can do is print a marker.
 ## Installation
 
 The plugin is installed into a dsh **profile**, which is a pnpm project under
-`~/.dsh/profiles/<name>`. It declares the harness packages as peer
-dependencies, so your profile supplies them and no second copy of the harness is
-pulled in.
+`~/.dsh/profiles/<name>`. It declares the harness packages as peer dependencies,
+so your profile supplies them and no second copy of the harness is pulled in.
 
 ```sh
 # From the registry, once published
@@ -298,6 +348,11 @@ To remove it: drop the dependency and the bundle entry from the profile's
 `package.json`, run `pnpm install` there, and delete the `shell-select:` section
 from `~/.dsh/settings.yaml` if you want the stored selection gone too.
 
+This repository commits its own `pnpm-lock.yaml`, so a clone installs the exact
+harness graph the suite was verified against (`pnpm install --frozen-lockfile`).
+That lockfile governs *this* repository's development install; your profile keeps
+its own.
+
 ### Pinning
 
 `peerDependencies` names the harness version this plugin is built and tested
@@ -312,14 +367,42 @@ prerelease range only matches prereleases at the same `major.minor.patch` —
 `^0.1.6-alpha.1` will not match `0.1.7-alpha.1`. When dsh moves, widen the range
 deliberately rather than by accident, and re-run the suite.
 
+The peers are marked `optional` in `peerDependenciesMeta`, which is how a plugin
+says "the deployment provides these, do not install them on my behalf". Without
+that, an installer would try to fetch a second harness inside the plugin's own
+tree, which is exactly the duplicate-copy problem peers exist to avoid.
+
 ## Development
 
 ```sh
-pnpm install
+pnpm install --frozen-lockfile   # pnpm is the supported installer; see below
 pnpm test
 ```
 
-155 tests across ten suites. Everything disposable lives under
+**pnpm is the supported installer**, and `packageManager` pins the version the
+whole suite was verified with. The harness itself is a pnpm workspace whose root
+manifest declares `packageManager: pnpm@11.7.0` and whose dependency graph uses
+`link:` overrides that npm cannot express, so npm is not a supported installer
+for anything in this ecosystem — including this plugin.
+
+`npm install` here fails with `ERESOLVE`, and the failure was traced rather than
+worked around. The harness's own cross-package `peerDependencies` are prerelease
+ranges such as `@deepseek-ai/dsh-agent@^0.1.6-alpha.1`; npm resolves those to the
+newest matching prerelease (`0.1.6-alpha.2`), whose own peers require the
+`alpha.2` line, while this package pins its `devDependencies` to the `alpha.1`
+line it was verified against. `--force` and `--legacy-peer-deps` are not
+workarounds for that: both would install a graph that disagrees with itself.
+pnpm resolves the same ranges correctly, and the committed `pnpm-lock.yaml` makes
+that graph the same one every time.
+
+`pnpm install` prints a warning that build scripts for `koffi`, `node-pty`, and
+`@deepseek-ai/dsh-subprocess-local` were ignored. That is pnpm 10's default
+deny-first policy and is deliberate here (`pnpm.onlyBuiltDependencies` is empty):
+nothing this plugin exercises needs those scripts to run. The prebuilt binaries
+those packages ship are what the real subprocess and sandbox providers use, and
+the integration lane proves they work.
+
+205 tests across eleven suites. Everything disposable lives under
 `<projectRoot>/.test-tmp/<unique-id>/`, where the project root is this package's
 own directory — never a parent, never a home directory. `test/helpers.mjs`
 refuses to remove a path outside that tree, and no test reads or writes a real
@@ -334,32 +417,39 @@ carried its own copy would resolve a second `@deepseek-ai/cordis`, and a service
 registered through one copy of that module is not the service the harness reads
 through another. Peers make the consumer's copy the only copy.
 
-`devDependencies` pins the same packages from the registry so that
-`pnpm install && pnpm test` works in a fresh clone on any machine, and so CI
-exercises the published artifacts rather than a local checkout. Both are pinned
-to the same version on purpose.
+`devDependencies` pins **only the packages the source and the suites actually
+import**, from the registry, so that `pnpm install && pnpm test` works in a fresh
+clone on any machine and CI exercises the published artifacts rather than a local
+checkout. The packages that exist only as runtime services a deployment mounts —
+`dsh-jobs`, `dsh-settings`, `dsh-system-prompt`, `dsh-shell-env`,
+`dsh-sandbox-policy` — stay declared as peers and are stubbed in the suites, so a
+plugin that never imports them does not drag their graphs into every install.
 
 ### The CI matrix is the point
 
-The catalog, the dialect builders, the resolution walk, and the
-working-directory rules are pure functions of `(platform, environment)` and run
-on every runner. Execution is what differs: this plugin is developed on Windows,
-so the POSIX lane is only ever *spawned* on the `ubuntu-latest` and
-`macos-latest` runners. `test/platform-lanes.spec.mjs` asserts which state each
-lane is in, so a lane that stops being covered fails rather than going quiet.
+The catalog, the dialect builders, the resolution walk, the identity guard, and
+the working-directory rules are pure functions of `(platform, environment)` and
+run on every runner. Execution is what differs: this plugin is developed on
+Windows, so the POSIX lane is only ever *spawned* on the `ubuntu-latest` and
+`macos-latest` runners. `test/lanes.mjs` fixes which shells each lane must cover,
+`test/integration.spec.mjs` runs both lanes on their own platform, and
+`test/platform-lanes.spec.mjs` asserts that a lane still names real catalog
+entries — so a lane that stops being covered fails rather than going quiet.
 
 | Suite | Covers |
 |---|---|
-| `catalog.spec.mjs` | Both platforms' catalogs, argv per dialect, the confinement verdicts, the WSL path translation, and that the catalog names shells rather than paths |
-| `discovery.spec.mjs` | Resolution through the seam, no-fallback-on-invalid-config, the failure naming every probed location, and the per-platform working-directory rule |
-| `executor.spec.mjs` | The gate: zero spawn requests for every refusal, no mode downgrade, argv reaching the process per dialect, `auto` selection, and the model-facing description |
+| `catalog.spec.mjs` | Both platforms' catalogs, argv per dialect, the confinement verdicts, the WSL path translation, the identity guard against a sibling shell's program, and that the catalog names shells rather than paths |
+| `discovery.spec.mjs` | Resolution through the seam, no-fallback-on-invalid-config, the override that names another shell, the failure naming every probed location, and the per-platform working-directory rule |
+| `executor.spec.mjs` | The decision: zero spawn requests for every refusal, no mode downgrade, one immutable decision per call (settings rewritten mid-call included), argv reaching the process per dialect, `auto` selection, concurrent refresh ordering, and the model-facing description |
+| `tool.spec.mjs` | The per-call record: the shell, executable, and working directory come from the call's own decision for foreground and background, an aborted or refused background call never reaches the job registry, and the description names the selected shell |
 | `cmd-command-transport.spec.mjs` | The direct form's measured corruption, the transport carrying quotes/redirection/chaining/Unicode filenames, the `%NAME%` limitation and its `call` opt-in |
-| `integration.spec.mjs` | Real processes: every installed shell, real confinement denial, timeout, cancellation, background read/kill |
+| `integration.spec.mjs` | Real processes on this host's lane: every required and installed shell, real confinement denial or a fail-closed refusal, timeout, cancellation, background read/kill, spaces and Unicode in the working directory, and `auto` |
+| `lanes.mjs` | The lane definitions themselves: which shells a platform's lane must cover and which may skip |
 | `platform-lanes.spec.mjs` | The verification boundary itself, asserted so it cannot be overclaimed |
-| `status.spec.mjs` | The separated status facts, the test action's refusal path, the loopback restriction |
+| `status.spec.mjs` | The separated status facts, probes running confined or not at all, a non-zero probe exit as a failure, the `sh` interpreter probe, the test action's refusal path, and the loopback restriction |
 | `settings.spec.mjs` | Persistence across a fresh composition, unrelated edits surviving, a change applying only to later calls |
 | `replacement.spec.mjs` | The guard denying every replaced name and leaving unrelated tools alone |
-| `client.spec.mjs` | The card bundle and its interaction: the slot key, the injected stylesheet and the design tokens it uses, collapsed-by-default disclosure, staging on choose, one revision-fenced save, discard, and the validation that blocks a save the host would refuse |
+| `client.spec.mjs` | The card bundle and its interaction: the slot key, the injected stylesheet and the design tokens it uses, collapsed-by-default disclosure, staging on choose, one revision-fenced save, discard, the override cleared on a shell change, stale-status and obsolete-test handling, boolean-versus-string field values, and the validation that blocks a save the host would refuse |
 
 ## Known limitations
 
@@ -367,7 +457,11 @@ lane is in, so a lane that stops being covered fails rather than going quiet.
   `danger-full-access` and are refused under `read-only`/`workspace-write`. This
   is deliberate: the alternatives are silently running unconfined (what several
   published plugins do) or never offering the shell. There is no opt-out setting.
-- **The POSIX lane is unverified at runtime** — see the section above.
+- **The POSIX lane is spawned in CI, not locally** — see the section above.
+- **An unconfineable shell shows no version in the card** under a confining mode,
+  because its probe is not allowed to run unconfined. The `danger-full-access`
+  mode, or a shell the mode can confine, is what produces a version line; the
+  card says which of the two happened.
 - **`run_code` program bodies and PTY routes are not controlled** — see the route
   table.
 - **Windows sandbox enforcement is `partial`** by the harness's own rating.
@@ -376,5 +470,10 @@ lane is in, so a lane that stops being covered fails rather than going quiet.
   never substitutes another directory.
 - **The loopback restriction is on the plugin's own routes**, not on the tool: an
   agent on the same machine reaches `shell` normally.
+- **The identity guard is a pairing check, not executable authentication.** It
+  refuses an override whose program name belongs to a different catalog entry, so
+  a `cmd.exe` path cannot be run with bash's arguments. A renamed binary that no
+  entry names is accepted, because the user selecting a shell is the assertion
+  being trusted; nothing here proves what a binary *is*.
 - **No destructive-command detection.** Shell selection is not a safety boundary,
   and this plugin does not pretend to be one.
