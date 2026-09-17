@@ -1,0 +1,13 @@
+node_modules/
+pnpm-lock.yaml
+
+# Disposable test fixtures. Every suite creates its own unique directory here
+# and removes it afterwards; helpers.mjs refuses to delete anything outside it.
+.test-tmp/
+
+# Local dsh profile scratch, when one is pointed at this directory
+.dsh-profile/
+
+*.log
+.DS_Store
+Thumbs.db

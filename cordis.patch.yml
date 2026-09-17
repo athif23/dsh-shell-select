@@ -1,0 +1,36 @@
+# dsh-shell-select composition layer.
+#
+# Applied after every bundle layer. It does two things:
+#
+# 1. Disables the shipped rows that own the local shell seat and the model-facing
+#    shell tools, so there is exactly one `ctx.shell` provider and exactly one
+#    shell tool. Both platform families are named because one patch file serves
+#    every platform: the row a given platform did not compose is simply absent
+#    and the patch for it is skipped with a warning, which is why the two
+#    platform pairs are all listed rather than selected with `!!js`.
+#
+#    Disabling rows is not by itself enough for the tools: agent presets re-mount
+#    `tool-bash`/`tool-pwsh` inside each agent's realm, where no patch can address
+#    them. The plugin's global tool guard denies those two names wherever they
+#    are registered, which covers the presets as well.
+#
+# 2. Inserts this plugin with no `shell` value, so the selection starts on
+#    `auto` (the platform's own default shell, as `ctx.subprocess` reports it).
+#    The user layer in `~/.dsh/settings.yaml` under the `shell-select` namespace
+#    overrides it, and the Web settings card writes there.
+
+- id: pwsh-sandbox
+  disabled: true
+
+- id: bash-sandbox
+  disabled: true
+
+- id: tool-pwsh
+  disabled: true
+
+- id: tool-bash
+  disabled: true
+
+- insert:
+    - id: shell-select
+      name: dsh-shell-select

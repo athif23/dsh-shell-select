@@ -1,0 +1,36 @@
+# The matrix is the point of this workflow, not a formality.
+#
+# The catalog, the dialect builders, the resolution walk, and the
+# working-directory rules are pure functions of `(platform, environment)`, so
+# they run on every runner. What differs is execution: the POSIX lane has never
+# been spawned outside this workflow, because plugin development happens on
+# Windows. Running the integration suite on ubuntu and macos is what turns the
+# POSIX rows from "reasoned about" into "observed".
+#
+# `test/platform-lanes.spec.mjs` asserts which of those two states each lane is
+# in, so a lane that stops being covered fails rather than going quiet.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: ['22.19', '24']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - run: pnpm install
+      - run: pnpm test
