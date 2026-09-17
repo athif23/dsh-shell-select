@@ -254,10 +254,20 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
    * Resolve the selected catalog entry, following `auto` when the settings ask
    * for the platform's own default.
    *
-   * `auto` reuses the harness's answer to "which shell belongs here":
-   * `ctx.subprocess.terminalEnvironment().defaultShell` is `%ComSpec%` on
-   * Windows and `$SHELL` on POSIX. When its basename names a catalog entry, that
-   * entry wins; otherwise the first entry that actually resolves does.
+   * `auto` must not change behavior for someone who installs this plugin onto a
+   * working deployment, which is what fixes how it resolves:
+   *
+   * - On POSIX, `ctx.subprocess.terminalEnvironment().defaultShell` is the
+   *   user's own login shell (`$SHELL`), a real preference, so a catalog entry
+   *   matching its basename wins.
+   * - On Windows the same field is `%ComSpec%`, which names the command
+   *   interpreter rather than a preference — every Windows host reports
+   *   `cmd.exe`. Preferring it would contradict the shell the harness's own
+   *   Windows executor resolves (PowerShell) and would silently downgrade an
+   *   existing deployment to cmd. Catalog order is the preference order there.
+   *
+   * Either way the first entry that actually resolves is the answer, so an
+   * uninstalled preference is skipped rather than refused.
    * @param platform - the execution platform.
    * @param signal - cancellation of the entry probes.
    * @returns the entry, or undefined when the settings name one this platform lacks.
@@ -266,20 +276,54 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
     const requested = this.shellSettings().shell
     if (requested !== AUTO_SHELL) return findEntry(platform, requested)
     const entries = catalogFor(platform)
-    let defaultShell
-    try {
-      defaultShell = (await this.ctx.subprocess.terminalEnvironment(signal)).defaultShell
-    } catch {
-      // A provider that cannot report a default leaves the resolution to the
-      // availability walk below.
-      defaultShell = undefined
-    }
-    if (typeof defaultShell === 'string' && defaultShell.length > 0) {
-      const leaf = basename(defaultShell).toLowerCase()
-      const named = entries.find(entry =>
+
+    /** The entry claiming a basename, when exactly one catalog row names it. */
+    const entryClaiming = leaf => {
+      const named = entries.filter(entry =>
         entry.candidates(process.env).some(candidate => basename(candidate).toLowerCase() === leaf))
-      if (named !== undefined) return named
+      return named.length === 1 ? named[0] : undefined
     }
+
+    // An explicit executable under `auto` names its own dialect: a user with
+    // `/opt/custom/bash` means bash, not whichever row happens to lead the
+    // catalog. Without this, `auto` plus an override would pair the override
+    // with the wrong argument dialect.
+    const configured = this.selectSettings.executable
+    if (typeof configured === 'string' && configured.trim().length > 0) {
+      const claimed = entryClaiming(basename(configured.trim()).toLowerCase())
+      if (claimed !== undefined) return claimed
+    }
+
+    // POSIX only: there the execution world's `defaultShell` is the user's own
+    // login shell (`$SHELL`), which is a real preference and wins — provided it
+    // is installed, since an uninstalled preference must fall through to one
+    // that works rather than produce an entry every call would refuse.
+    //
+    // On Windows the same field is `%ComSpec%`, which identifies the command
+    // interpreter rather than a preference — every Windows host reports
+    // cmd.exe. Preferring it would contradict the shell the harness itself
+    // ships with (PowerShell), and would silently change behavior for anyone
+    // installing this plugin onto a working deployment. There, catalog order is
+    // the preference order, and the catalog puts PowerShell first because that
+    // is what the harness's Windows executor resolves.
+    if (platform === 'posix') {
+      let defaultShell
+      try {
+        defaultShell = (await this.ctx.subprocess.terminalEnvironment(signal)).defaultShell
+      } catch {
+        // A provider that cannot report a default leaves the resolution to the
+        // availability walk below.
+        defaultShell = undefined
+      }
+      if (typeof defaultShell === 'string' && defaultShell.length > 0) {
+        const preferred = entryClaiming(basename(defaultShell).toLowerCase())
+        if (preferred !== undefined) {
+          const inspection = await inspectShell(this.ctx, { entry: preferred, configuredPath: undefined, env: undefined, signal })
+          if (inspection.available === true) return preferred
+        }
+      }
+    }
+
     for (const entry of entries) {
       const inspection = await inspectShell(this.ctx, { entry, configuredPath: undefined, env: undefined, signal })
       if (inspection.available === true) return entry

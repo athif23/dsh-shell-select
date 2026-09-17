@@ -68,7 +68,7 @@ describe('refuses before any process exists', () => {
     const { shell, subprocess } = await mount({ shell: 'gitbash' }, { platform: 'posix' })
     const { error } = await attempt(shell, { command: 'echo hi', workdir })
     assert.match(error.message, /does not exist on posix/u)
-    assert.match(error.message, /Available: zsh, bash, fish, sh, pwsh/u)
+    assert.match(error.message, /Available: bash, zsh, fish, sh, pwsh/u)
     assert.equal(subprocess.spawns.length, 0)
   })
 
@@ -231,23 +231,51 @@ describe('argv reaches the process per dialect', () => {
 })
 
 describe('auto selection', () => {
-  it('follows the shell the execution world reports as its default', async () => {
-    const { shell } = await mount(
-      { shell: 'auto' },
-      { defaultShell: 'C:\\Windows\\system32\\cmd.exe' },
-    )
-    assert.equal(shell.describeShell().id, 'cmd')
+  it('takes the catalog preference on Windows, not %ComSpec%', async () => {
+    // Every Windows host reports cmd.exe as its default shell, so following it
+    // would silently downgrade a deployment that the harness ships running
+    // PowerShell. Catalog order decides instead.
+    const { shell } = await mount({ shell: 'auto' }, { defaultShell: 'C:\\Windows\\system32\\cmd.exe' })
+    assert.equal(shell.describeShell().id, 'pwsh', 'PowerShell 7 leads the Windows catalog')
   })
 
-  it('picks the first shell that resolves when the world reports no default', async () => {
+  it('follows $SHELL on POSIX, where it is a real preference', async () => {
+    const { shell } = await mount(
+      { shell: 'auto' },
+      { platform: 'posix', defaultShell: '/usr/bin/fish', resolvable: { bash: '/bin/bash', fish: '/usr/bin/fish' } },
+    )
+    assert.equal(shell.describeShell().id, 'fish')
+  })
+
+  it('falls through to the catalog when the preferred shell is not installed', async () => {
+    const { shell } = await mount(
+      { shell: 'auto' },
+      { platform: 'posix', defaultShell: '/usr/bin/fish', resolvable: { bash: '/bin/bash' } },
+    )
+    assert.equal(shell.describeShell().id, 'bash', 'an uninstalled preference is skipped, not refused')
+  })
+
+  it('picks the first shell that resolves when nothing is preferred', async () => {
     const { shell } = await mount({ shell: 'auto' }, { resolvable: { 'wsl.exe': 'C:\\Windows\\System32\\wsl.exe' } })
     assert.equal(shell.describeShell().id, 'wsl')
   })
 
   it('reports the resolved id rather than the word auto', async () => {
     const { shell } = await mount({ shell: 'auto' }, { defaultShell: 'C:\\Windows\\system32\\cmd.exe' })
-    assert.equal(shell.describeShell().id, 'cmd')
+    assert.equal(shell.describeShell().id, 'pwsh')
     assert.notEqual(shell.describeShell().id, 'auto')
+  })
+
+  it('reproduces the harness default on each platform', async () => {
+    // The property that matters for anyone installing this onto a working
+    // deployment: `auto` must not change which shell runs.
+    const windows = await mount({ shell: 'auto' }, { defaultShell: 'C:\\Windows\\system32\\cmd.exe' })
+    assert.match(windows.shell.describeShell().dialect, /powershell/u)
+    const posix = await mount(
+      { shell: 'auto' },
+      { platform: 'posix', defaultShell: '/bin/bash', resolvable: { bash: '/bin/bash' } },
+    )
+    assert.equal(posix.shell.describeShell().id, 'bash')
   })
 })
 

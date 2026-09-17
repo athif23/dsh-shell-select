@@ -106,7 +106,7 @@ describe('inspectCatalog', () => {
   it('reports one row per entry with the selection marked', async () => {
     const { ctx } = await contextWith({ bash: '/bin/bash', zsh: '/bin/zsh' })
     const rows = await inspectCatalog(ctx, 'posix', { selectedId: 'bash', configuredPath: undefined, env: {} })
-    assert.deepEqual(rows.map(row => row.id), ['zsh', 'bash', 'fish', 'sh', 'pwsh'])
+    assert.deepEqual(rows.map(row => row.id), ['bash', 'zsh', 'fish', 'sh', 'pwsh'])
     assert.deepEqual(rows.filter(row => row.selected).map(row => row.id), ['bash'])
     assert.equal(rows.find(row => row.id === 'bash').available, true)
     assert.equal(rows.find(row => row.id === 'fish').available, false)

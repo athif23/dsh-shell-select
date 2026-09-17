@@ -96,14 +96,20 @@ describe('shells this host provides', () => {
     })
   }
 
-  it('resolves auto to the shell the execution world reports', { skip: !isWindows && 'no Windows host' }, async () => {
+  it('resolves auto to the harness\'s own shell for this platform', { skip: !isWindows && 'no Windows host' }, async () => {
     const { ctx, shell } = await boot({ shell: 'auto' })
     try {
       const describe = shell.describeShell()
       assert.equal(describe.platform, 'windows')
-      // %ComSpec% names cmd.exe on every Windows host.
-      assert.equal(describe.id, 'cmd')
-      const result = await run(shell, 'echo AUTO-OK')
+      // PowerShell, not cmd: this is the family the harness's Windows executor
+      // runs, so installing the plugin does not change which shell an agent
+      // gets. Which PowerShell depends on what this host has — 7 leads the
+      // catalog, 5.1 is the fallback every Windows host carries.
+      const preferred = await available(shell, 'pwsh') ? 'pwsh' : 'powershell'
+      assert.equal(describe.id, preferred)
+      assert.equal(describe.dialect, 'powershell')
+      assert.notEqual(describe.id, 'cmd', 'auto must not downgrade to cmd')
+      const result = await run(shell, 'Write-Output AUTO-OK')
       assert.equal(result.exitCode, 0, result.stderr.text)
       assert.match(result.stdout.text, /AUTO-OK/u)
     } finally {

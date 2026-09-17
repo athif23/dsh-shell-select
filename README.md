@@ -100,10 +100,11 @@ asserts this coverage so it cannot silently regress.
   wrap argv and are indifferent to which shell is inside — that is the harness's
   documented behavior, not a measurement made here. The status payload reports
   `confinementVerified: false` on POSIX, and the card shows a warning.
-- **`auto` on POSIX has not been observed.** It follows
-  `ctx.subprocess.terminalEnvironment().defaultShell` (which reads `$SHELL`),
-  falling back to the first entry that resolves. The mechanism is the harness's;
-  the outcome on a given Linux or macOS host is untested.
+- **`auto` on POSIX has not been observed.** The rule is: a `$SHELL` naming a
+  catalog entry wins when that entry is installed, otherwise the first entry
+  that resolves (bash, then zsh, sh, fish, pwsh). The `$SHELL` half reads the
+  harness's own `terminalEnvironment`; the outcome on a given Linux or macOS
+  host is exercised only by the CI matrix, not locally.
 - **Remote execution worlds are unexercised.** Resolution goes through
   `ctx.subprocess`, so an SSH or hosted provider should resolve against its own
   filesystem, but no such provider was available to test. Working-directory
@@ -196,7 +197,7 @@ One namespace in `~/.dsh/settings.yaml`, editable from the Web settings card
 
 | Field | Meaning |
 |---|---|
-| `shell` | A catalog id, or `auto` (the default). `auto` follows the platform's own default shell. |
+| `shell` | A catalog id, or `auto` (the default). `auto` picks the first catalog entry that resolves, so installing the plugin does not change which shell an agent gets: PowerShell leads the Windows catalog because that is what the harness's Windows executor runs, and bash leads the POSIX catalog for the same reason. On POSIX a `$SHELL` that names a catalog entry wins, since there it is a real user preference. |
 | `executable` | Optional explicit path. Wins over discovery; a value that cannot be resolved is an error, never a cue to discover instead. |
 | `loginShell` | Run a bash-family shell with `-l`. Off by default. |
 | `wslDistro`, `wslMountRoot` | WSL distribution name and where it mounts Windows drives (default `/mnt`). |

@@ -22,6 +22,7 @@ const workspace = join(fixture, 'work')
 mkdirSync(workspace, { recursive: true })
 
 const WINDOWS_EXES = {
+  'C:\\Program Files\\PowerShell\\7\\pwsh.exe': 'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
   cmd: 'C:\\Windows\\system32\\cmd.exe',
   'D:\\Git\\bin\\bash.exe': 'D:\\Git\\bin\\bash.exe',
   'bash.exe': 'D:\\Git\\bin\\bash.exe',
@@ -91,9 +92,9 @@ describe('status payload', () => {
   it('reports the resolved shell when the setting is auto', async () => {
     const { ctx, shell } = await mount({ shell: 'auto' }, { defaultShell: 'C:\\Windows\\system32\\cmd.exe' })
     const status = await buildStatus(ctx, shell)
-    assert.equal(status.active.shell, 'auto')
-    assert.equal(status.active.selected, 'cmd', 'the card shows what auto resolved to')
-    assert.equal(status.shells.find(row => row.id === 'cmd').selected, true)
+    assert.equal(status.active.shell, 'auto', 'the setting is reported as written')
+    assert.equal(status.active.selected, 'pwsh', 'the card shows what auto resolved to')
+    assert.equal(status.shells.find(row => row.id === 'pwsh').selected, true)
   })
 
   it('keeps "installed" and "usable in this mode" as separate facts', async () => {

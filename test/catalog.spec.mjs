@@ -41,7 +41,7 @@ const WINDOWS_ENV = {
 describe('catalog shape', () => {
   it('lists the shells each platform actually has', () => {
     assert.deepEqual(catalogFor('windows').map(entry => entry.id), ['pwsh', 'powershell', 'cmd', 'gitbash', 'wsl'])
-    assert.deepEqual(catalogFor('posix').map(entry => entry.id), ['zsh', 'bash', 'fish', 'sh', 'pwsh'])
+    assert.deepEqual(catalogFor('posix').map(entry => entry.id), ['bash', 'zsh', 'fish', 'sh', 'pwsh'])
   })
 
   it('rejects an unknown platform rather than guessing one', () => {

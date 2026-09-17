@@ -214,16 +214,11 @@ const ENTRIES = {
       },
     },
   ],
+  // Catalog order is preference order: `auto` takes the first entry that
+  // resolves. Bash leads because that is the shell the harness's own POSIX
+  // executor runs, so `auto` reproduces the shipped behavior instead of picking
+  // a different shell on a deployment that never asked to change one.
   posix: [
-    {
-      id: 'zsh',
-      label: 'Zsh',
-      dialect: 'bash',
-      syntax: POSIX_SHELL_SYNTAX,
-      candidates: () => ['zsh'],
-      supportsLoginShell: false,
-      confineable: { confined: true },
-    },
     {
       id: 'bash',
       label: 'Bash',
@@ -231,6 +226,15 @@ const ENTRIES = {
       syntax: POSIX_SHELL_SYNTAX,
       candidates: () => ['bash'],
       supportsLoginShell: true,
+      confineable: { confined: true },
+    },
+    {
+      id: 'zsh',
+      label: 'Zsh',
+      dialect: 'bash',
+      syntax: POSIX_SHELL_SYNTAX,
+      candidates: () => ['zsh'],
+      supportsLoginShell: false,
       confineable: { confined: true },
     },
     {
