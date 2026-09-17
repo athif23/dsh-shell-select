@@ -251,6 +251,26 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
   }
 
   /**
+   * The diagnostic for a selection that resolved to no catalog entry.
+   *
+   * A named shell that this platform lacks and an `auto` selection that found
+   * nothing installed are different problems with different remedies, so they
+   * get different sentences: telling a user that a shell named "auto" does not
+   * exist on Windows describes the setting rather than the machine.
+   * @param platform - the execution platform.
+   * @returns the message a refusal or the cached description reports.
+   */
+  unresolvedSelection(platform) {
+    const requested = this.selectSettings.shell
+    const known = catalogFor(platform).map(candidate => candidate.id).join(', ')
+    if (requested === AUTO_SHELL) {
+      return `no shell in the ${platform} catalog resolved in the execution environment `
+        + `(tried: ${known}); set "shell" to one of them, or "executable" to an explicit path`
+    }
+    return `the selected shell ${JSON.stringify(requested)} does not exist on ${platform}. Available: ${known}`
+  }
+
+  /**
    * Resolve the selected catalog entry, following `auto` when the settings ask
    * for the platform's own default.
    *
@@ -340,10 +360,7 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
     const platform = await this.executionPlatformNow()
     const entry = await this.resolveEntry(platform, undefined)
     if (entry === undefined) {
-      this.selection = {
-        platform,
-        detail: `no shell named ${JSON.stringify(settings.shell)} exists on ${platform}`,
-      }
+      this.selection = { platform, detail: this.unresolvedSelection(platform) }
       return this.selection
     }
     const inspection = await inspectShell(this.ctx, {
@@ -426,10 +443,7 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
     const platform = await this.executionPlatformNow()
     const entry = await this.resolveEntry(platform, spec.signal)
     if (entry === undefined) {
-      throw new Error(
-        `dsh-shell-select: the selected shell ${JSON.stringify(settings.shell)} does not exist on ${platform}. `
-        + `Available: ${catalogFor(platform).map(candidate => candidate.id).join(', ')}`,
-      )
+      throw new Error(`dsh-shell-select: ${this.unresolvedSelection(platform)}`)
     }
     if (settings.loginShell === true && entry.dialect !== 'bash' && entry.dialect !== 'wsl') {
       throw new Error(

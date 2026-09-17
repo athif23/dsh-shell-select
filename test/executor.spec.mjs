@@ -260,6 +260,28 @@ describe('auto selection', () => {
     assert.equal(shell.describeShell().id, 'wsl')
   })
 
+  it('describes an empty catalog as a machine problem, not a bad setting', async () => {
+    // `auto` is not a shell name, so telling the user that "auto" does not exist
+    // on Windows describes the setting instead of the machine — and sends them
+    // looking for a typo that is not there.
+    const { shell } = await mount({ shell: 'auto' }, { resolvable: {} })
+    const describe = shell.describeShell()
+    assert.equal(describe.available, false)
+    assert.match(describe.detail, /no shell in the windows catalog resolved/u)
+    assert.ok(!describe.detail.includes('"auto"'), 'the setting is not reported as a missing shell')
+    assert.match(describe.detail, /set "shell" to one of them, or "executable"/u)
+
+    const { error } = await attempt(shell, { command: 'echo hi', workdir })
+    assert.match(error.message, /no shell in the windows catalog resolved/u)
+    assert.ok(!error.message.includes('"auto"'))
+  })
+
+  it('still names a genuinely unknown shell', async () => {
+    const { shell } = await mount({ shell: 'gitbash' }, { platform: 'posix' })
+    const { error } = await attempt(shell, { command: 'echo hi', workdir })
+    assert.match(error.message, /the selected shell "gitbash" does not exist on posix/u)
+  })
+
   it('reports the resolved id rather than the word auto', async () => {
     const { shell } = await mount({ shell: 'auto' }, { defaultShell: 'C:\\Windows\\system32\\cmd.exe' })
     assert.equal(shell.describeShell().id, 'pwsh')
