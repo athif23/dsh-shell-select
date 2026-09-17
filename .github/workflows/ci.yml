@@ -32,5 +32,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: pnpm
-      - run: pnpm install
+      # The lockfile is committed, so the CI graph is the reviewed one rather
+      # than whatever the ranges resolve to that day.
+      - run: pnpm install --frozen-lockfile
       - run: pnpm test
