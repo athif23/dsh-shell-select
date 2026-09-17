@@ -515,6 +515,34 @@ describe('the selection is read live', () => {
     assert.equal(shell.describeShell().executable, custom)
   })
 
+  it('resolves the same executable for the card and for a call', async () => {
+    // The card's rows and the decision a call makes apply one override rule, so
+    // what the settings surface reports as effective is what a command runs —
+    // including the inherited `shell.pwshPath` an existing deployment set.
+    const custom = 'D:\\tools\\pwsh.exe'
+    const viaInherited = await mount(
+      { shell: 'pwsh', pwshPath: custom },
+      { resolvable: { [custom]: custom } },
+    )
+    const inheritedRows = await viaInherited.shell.describeCatalog()
+    const inheritedCall = await viaInherited.shell.decide(viaInherited.shell.resolve({
+      command: 'x', workdir, sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: workdir },
+    }))
+    assert.equal(inheritedRows.find(row => row.id === 'pwsh').path, custom)
+    assert.equal(inheritedCall.decision.executable, custom)
+
+    const override = 'C:\\tools\\cmd.exe'
+    const viaOverride = await mount({ shell: 'cmd', executable: override }, { resolvable: { [override]: override } })
+    const overrideRows = await viaOverride.shell.describeCatalog()
+    const overrideCall = await viaOverride.shell.decide(viaOverride.shell.resolve({
+      command: 'x', workdir, sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: workdir },
+    }))
+    assert.equal(overrideRows.find(row => row.id === 'cmd').path, override)
+    assert.equal(overrideCall.decision.executable, override)
+    // The override names one shell, so no other row reports it as its own.
+    assert.ok(overrideRows.filter(row => row.path === override).length === 1)
+  })
+
   it('lets the shell-select executable override win over shell.pwshPath', async () => {
     const custom = 'D:\\tools\\pwsh.exe'
     const other = 'E:\\other\\pwsh.exe'
