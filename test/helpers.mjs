@@ -104,8 +104,11 @@ function makeHandle(spec, outcome, output) {
  *
  * `resolveExecutable` mirrors the real provider's contract: a name it does not
  * know raises `SubprocessExecutableNotFoundError`, which is exactly what
- * discovery must treat as "try the next candidate".
- * @param options - platform, default shell, resolvable names, and spawn outcome.
+ * discovery must treat as "try the next candidate". `delayMsFor` and
+ * `onResolve` exist so a suite can make one resolution slower than another, or
+ * change the world while a call is being prepared.
+ * @param options - platform, default shell, resolvable names, spawn outcome,
+ *   per-command resolution delay, and a hook run during resolution.
  * @returns the seam stand-in plus its recorded calls.
  */
 export function stubSubprocess(options = {}) {
@@ -120,6 +123,11 @@ export function stubSubprocess(options = {}) {
     defaultShell: options.defaultShell,
     async resolveExecutable(command, _env, _signal) {
       resolutions.push(command)
+      options.onResolve?.(command, resolutions.length)
+      const delay = options.delayMsFor?.(command, resolutions.length)
+      if (delay !== undefined && delay > 0) {
+        await new Promise(resolve => { setTimeout(resolve, delay) })
+      }
       const known = this.resolvable[command]
       if (known !== undefined) return known
       // An absolute path is verified by the real provider; the stub accepts it
@@ -148,14 +156,17 @@ export function stubSubprocess(options = {}) {
  * Returns the caller's argv unchanged, which is enough for the executor's
  * argv-construction assertions; real confinement behavior is exercised by the
  * integration suite against the shipped provider.
+ * @param options - an optional `confine` replacing the pass-through, so a suite
+ *   can script a runner failure or a refusal.
  * @returns the provider stand-in plus its recorded calls.
  */
-export function stubSandbox() {
+export function stubSandbox(options = {}) {
   const calls = []
   return {
     calls,
-    confine(argv, policy) {
+    confine(argv, policy, signal) {
       calls.push({ argv: [...argv], policy })
+      if (options.confine !== undefined) return options.confine(argv, policy, signal)
       return Promise.resolve({
         argv: [...argv],
         enforcement: 'partial',

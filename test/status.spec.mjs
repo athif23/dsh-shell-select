@@ -39,8 +39,13 @@ async function mount(config, options = {}) {
     output: options.output,
     outcome: options.outcome,
   })
-  const sandbox = stubSandbox()
-  const context = await makeContext({ mode: options.mode ?? 'workspace-write', subprocess, sandbox, workspaceRoot: workspace })
+  const sandbox = options.sandbox ?? stubSandbox()
+  const context = await makeContext({
+    mode: options.mode ?? 'workspace-write',
+    subprocess,
+    sandbox,
+    workspaceRoot: options.workspaceRoot ?? workspace,
+  })
   const routes = new Map()
   await context.plugin({
     name: 'stub-webserver',
@@ -129,6 +134,114 @@ describe('status payload', () => {
     assert.equal(status.shells.find(row => row.id === 'cmd').version, 'Microsoft Windows [Version 10]')
   })
 
+  it('probes every resolvable shell through confinement, never around it', async () => {
+    const { ctx, shell, sandbox } = await mount(
+      { shell: 'cmd' },
+      { output: { stdout: 'Microsoft Windows [Version 10]\n' } },
+    )
+    const status = await buildStatus(ctx, shell)
+    assert.equal(status.shells.find(row => row.id === 'cmd').version, 'Microsoft Windows [Version 10]')
+    const probed = status.shells.filter(row => row.available === true)
+    // Git Bash is resolvable and unconfineable, so it is not probed at all.
+    const probedRows = probed.filter(row => row.confineable)
+    assert.equal(sandbox.calls.length, probedRows.length, 'every probe went through ctx.sandbox.confine')
+    for (const call of sandbox.calls) {
+      assert.equal(call.policy.mode, 'workspace-write', 'the deployment policy, not a relaxation')
+    }
+  })
+
+  it('never probes an executable whose workspace cannot be validated', async () => {
+    const { ctx, shell, subprocess } = await mount({ shell: 'cmd' }, { workspaceRoot: join(fixture, 'gone') })
+    const status = await buildStatus(ctx, shell)
+    const cmd = status.shells.find(row => row.id === 'cmd')
+    assert.match(cmd.versionError, /probe not run: .*working directory does not exist/u)
+    assert.equal(subprocess.spawns.length, 0, 'a probe stops before spawning, like a command does')
+  })
+
+  it('does not probe a shell the current mode cannot confine', async () => {
+    // A configurable executable path must not become an unrestricted execution
+    // channel just because the probe's arguments are fixed.
+    const { ctx, shell, sandbox } = await mount({ shell: 'cmd' })
+    const status = await buildStatus(ctx, shell)
+    const gitbash = status.shells.find(row => row.id === 'gitbash')
+    assert.equal(gitbash.available, true)
+    assert.match(gitbash.versionError, /not probed: Git Bash cannot be confined under "workspace-write"/u)
+    assert.equal(gitbash.confinement.observed, 'not-probed')
+    assert.equal(sandbox.calls.some(call => call.argv[0].toLowerCase().endsWith('bash.exe')), false,
+      'the unconfineable shell was never spawned')
+  })
+
+  it('reports a confined probe as observed confinement, per shell', async () => {
+    const { ctx, shell } = await mount({ shell: 'cmd' })
+    const status = await buildStatus(ctx, shell)
+    const cmd = status.shells.find(row => row.id === 'cmd')
+    // The catalog's claim, whether it was measured on this platform, and what
+    // this machine was seen to do — three facts, not one word.
+    assert.deepEqual(cmd.confinement, { expected: 'confined', verified: true, observed: 'confirmed' })
+    const gitbash = status.shells.find(row => row.id === 'gitbash')
+    assert.equal(gitbash.confinement.expected, 'unconfined')
+    assert.match(gitbash.confinement.reason, /MSYS2|restricted token/u)
+  })
+
+  it('reports a probe that ran without confinement as unconfined, not verified', async () => {
+    const { ctx, shell } = await mount({ shell: 'gitbash' }, { mode: 'danger-full-access' })
+    const status = await buildStatus(ctx, shell)
+    const gitbash = status.shells.find(row => row.id === 'gitbash')
+    assert.equal(gitbash.confineable, false, 'the capability does not change with the mode')
+    assert.equal(gitbash.usableInMode, true)
+    assert.equal(gitbash.confinement.observed, 'ran-unconfined',
+      'the probe ran, and the row must not present that as confinement')
+  })
+
+  it('treats a non-zero probe exit as a failure even when it printed something', async () => {
+    // `dash` answers `--version` with "Illegal option" on stderr and exit 2.
+    const { ctx, shell } = await mount({ shell: 'cmd' },
+      { outcome: { exitCode: 2, signal: null }, output: { stderr: 'sh: 0: Illegal option --\n' } })
+    const status = await buildStatus(ctx, shell)
+    const cmd = status.shells.find(row => row.id === 'cmd')
+    assert.equal(cmd.version, undefined, 'the error text must never be reported as a version')
+    assert.match(cmd.versionError, /exited with code 2: sh: 0: Illegal option --/u)
+  })
+
+  it('asks a POSIX sh for its interpreter instead of a version flag it may not have', async () => {
+    // The stub's execution platform is posix while the host is Windows, so only
+    // a root path is both absolutely-posix and a directory the local check can
+    // stat; the probe's own validation is what this case is exercising.
+    const { ctx, shell } = await mount(
+      { shell: 'sh' },
+      {
+        platform: 'posix',
+        resolvable: { sh: '/usr/bin/sh' },
+        output: { stdout: 'dash\n' },
+        workspaceRoot: '/',
+      },
+    )
+    const status = await buildStatus(ctx, shell)
+    const sh = status.shells.find(row => row.id === 'sh')
+    assert.equal(sh.interpreter, 'dash')
+    assert.equal(sh.version, undefined)
+  })
+
+  it('reports a probe the runner could not start as a runner failure', async () => {
+    const sandbox = stubSandbox({
+      confine: () => Promise.resolve({
+        argv: ['/runner', 'wrap'],
+        enforcement: 'partial',
+        denialSignatures: [],
+        runnerFailureRules: [{ fatalSignatures: ['runner could not start'] }],
+      }),
+    })
+    const { ctx, shell } = await mount({ shell: 'cmd' }, {
+      sandbox,
+      outcome: { exitCode: 127, signal: null },
+      output: { stderr: 'runner could not start\n' },
+    })
+    const status = await buildStatus(ctx, shell)
+    const cmd = status.shells.find(row => row.id === 'cmd')
+    assert.equal(cmd.confinement.observed, 'runner-failed')
+    assert.match(cmd.versionError, /the sandbox runner could not start this shell/u)
+  })
+
   it('surfaces a probe failure without failing the whole payload', async () => {
     const { ctx, shell } = await mount({ shell: 'cmd' }, { outcome: { exitCode: 1, signal: null } })
     const status = await buildStatus(ctx, shell)
@@ -171,10 +284,10 @@ describe('test action', () => {
     assert.equal(subprocess.spawns.length, 0)
   })
 
-  it('reports an unresolvable shell as an executable problem, not a run problem', async () => {
+  it('reports an unresolvable shell as a selection problem, not a run problem', async () => {
     const { ctx, shell } = await mount({ shell: 'cmd' }, { resolvable: {} })
     const result = await runShellTest(ctx, shell)
-    assert.equal(result.stage, 'executable')
+    assert.equal(result.stage, 'selection')
     assert.match(result.detail, /no Command Prompt \(cmd\.exe\) executable found/u)
   })
 })

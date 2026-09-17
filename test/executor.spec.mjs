@@ -43,6 +43,8 @@ async function mount(config, options = {}) {
     platform: options.platform ?? 'windows',
     defaultShell: options.defaultShell,
     resolvable: options.resolvable ?? WINDOWS_EXES,
+    delayMsFor: options.delayMsFor,
+    onResolve: options.onResolve,
   })
   const sandbox = stubSandbox()
   const context = await makeContext({ ...options, subprocess, sandbox, workspaceRoot: fixture })
@@ -230,6 +232,128 @@ describe('argv reaches the process per dialect', () => {
   })
 })
 
+describe('one immutable decision per call', () => {
+  /** The full-access policy the argv assertions use, so nothing is confined. */
+  const policy = mode => ({ mode, workspaceRoot: workdir })
+
+  it('decides the entry, the executable, and the launch options together', async () => {
+    const { shell, subprocess } = await mount({ shell: 'gitbash', loginShell: true })
+    const decided = await shell.decide(shell.resolve({
+      command: 'echo hi',
+      workdir,
+      sandboxPolicy: policy('danger-full-access'),
+    }))
+    assert.equal(decided.decision.shell.id, 'gitbash')
+    assert.equal(decided.decision.executable, 'D:\\Git\\bin\\bash.exe')
+    assert.deepEqual(decided.decision.argv, ['D:\\Git\\bin\\bash.exe', '-l', '-c', 'echo hi'])
+    await shell.run(decided.spec)
+    assert.deepEqual(subprocess.spawns[0].argv, decided.decision.argv,
+      'the spawn is the decision, not a second reading of the settings')
+  })
+
+  it('keeps the decided shell when the settings change before the spawn', async () => {
+    const { shell, subprocess } = await mount({ shell: 'cmd' })
+    const decided = await shell.decide(shell.resolve({
+      command: 'echo hi', workdir, sandboxPolicy: policy('danger-full-access'),
+    }))
+    // The settings document is rewritten between the decision and the spawn.
+    shell.shellSettings = () => ShellSelectConfig({ shell: 'pwsh', loginShell: true })
+    await shell.run(decided.spec)
+    assert.ok(subprocess.spawns[0].argv[0].toLowerCase().endsWith('cmd.exe'), 'the decided shell ran')
+    assert.equal(subprocess.spawns.length, 1, 'and nothing else ran')
+  })
+
+  it('keeps the decided launch options when the settings change before the spawn', async () => {
+    // A mixed call — one shell's executable with another revision's flags — is
+    // what a per-field re-read would produce.
+    const { shell, subprocess } = await mount({ shell: 'gitbash', loginShell: true })
+    const decided = await shell.decide(shell.resolve({
+      command: 'echo hi', workdir, sandboxPolicy: policy('danger-full-access'),
+    }))
+    shell.shellSettings = () => ShellSelectConfig({ shell: 'gitbash', loginShell: false })
+    await shell.run(decided.spec)
+    assert.deepEqual(subprocess.spawns[0].argv, ['D:\\Git\\bin\\bash.exe', '-l', '-c', 'echo hi'])
+  })
+
+  it('starts a background process from the decision it was given', async () => {
+    const { shell, subprocess } = await mount({ shell: 'cmd' })
+    const decided = await shell.decide(shell.resolve({
+      command: 'echo hi', workdir, sandboxPolicy: policy('danger-full-access'),
+    }))
+    shell.shellSettings = () => ShellSelectConfig({ shell: 'pwsh' })
+    const proc = await shell.start({ ...decided.spec, signal: undefined })
+    await proc.done
+    assert.ok(subprocess.spawns[0].argv[0].toLowerCase().endsWith('cmd.exe'))
+  })
+
+  it('reads the next call from the next snapshot', async () => {
+    const { shell, subprocess } = await mount({ shell: 'cmd' })
+    const first = await shell.decide(shell.resolve({
+      command: 'echo hi', workdir, sandboxPolicy: policy('danger-full-access'),
+    }))
+    shell.shellSettings = () => ShellSelectConfig({ shell: 'pwsh' })
+    const second = await shell.decide(shell.resolve({
+      command: 'echo hi', workdir, sandboxPolicy: policy('danger-full-access'),
+    }))
+    assert.equal(first.decision.shell.id, 'cmd')
+    assert.equal(second.decision.shell.id, 'pwsh')
+    await shell.run(first.spec)
+    await shell.run(second.spec)
+    assert.deepEqual(
+      subprocess.spawns.map(spawn => spawn.argv[0].toLowerCase().endsWith('cmd.exe') ? 'cmd' : 'pwsh'),
+      ['cmd', 'pwsh'],
+    )
+  })
+})
+
+describe('races between a call and the selection', () => {
+  it('does not let an in-flight call overwrite a refreshed description', async () => {
+    // The call resolves slowly through the seam; meanwhile the selection moves
+    // on and the description refreshes. The finishing call describes itself, not
+    // the selection.
+    const { shell } = await mount({ shell: 'cmd' }, {
+      delayMsFor: command => command.toLowerCase().endsWith('cmd.exe') ? 40 : 0,
+    })
+    const pending = shell.run(shell.resolve({
+      command: 'echo hi',
+      workdir,
+      sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: workdir },
+    }))
+    shell.shellSettings = () => ShellSelectConfig({ shell: 'pwsh' })
+    await shell.refreshSelection()
+    assert.equal(shell.describeShell().id, 'pwsh')
+    await pending
+    assert.equal(shell.describeShell().id, 'pwsh', 'the finished call left the description alone')
+  })
+
+  it('never lets an older selection refresh overwrite a newer one', async () => {
+    // Two refreshes overlap and the older one settles last, which is what a
+    // settings write during the first read produces. The newest answer must
+    // stand, in the cache the description is built from.
+    const { shell } = await mount({ shell: 'cmd' }, {
+      delayMsFor: command => command.toLowerCase().endsWith('cmd.exe') ? 60 : 0,
+    })
+    const older = shell.refreshSelection()
+    shell.shellSettings = () => ShellSelectConfig({ shell: 'pwsh' })
+    const newer = shell.refreshSelection()
+    assert.equal((await newer).entry.id, 'pwsh')
+    assert.equal((await older).entry.id, 'pwsh', 'the slow, superseded answer does not publish')
+    assert.equal(shell.describeShell().id, 'pwsh')
+  })
+
+  it('publishes several concurrent refreshes as the newest one', async () => {
+    const { shell } = await mount({ shell: 'cmd' }, {
+      delayMsFor: command => command.toLowerCase().endsWith('cmd.exe') ? 30 : 0,
+    })
+    const first = shell.refreshSelection()
+    const second = shell.refreshSelection()
+    shell.shellSettings = () => ShellSelectConfig({ shell: 'powershell' })
+    const third = shell.refreshSelection()
+    const settled = await Promise.all([first, second, third])
+    assert.deepEqual(settled.map(selection => selection.entry.id), ['powershell', 'powershell', 'powershell'])
+  })
+})
+
 describe('auto selection', () => {
   it('takes the catalog preference on Windows, not %ComSpec%', async () => {
     // Every Windows host reports cmd.exe as its default shell, so following it
@@ -376,7 +500,8 @@ describe('the selection is read live', () => {
     await shell.refreshSelection()
     assert.equal(shell.describeShell().id, 'pwsh')
     // The spec produced under the previous selection keeps its own policy; the
-    // executor re-reads the selection per call, which is why the gate re-runs.
+    // executor decides afresh per call, which is what makes the next call use
+    // the new shell.
     assert.equal(before.sandboxPolicy.mode, 'workspace-write')
 
     await attempt(shell, {
@@ -384,7 +509,6 @@ describe('the selection is read live', () => {
     })
     assert.ok(subprocess.spawns[0].argv[0].toLowerCase().endsWith('pwsh.exe'), 'the next call used the new shell')
   })
-
   it('keeps shell.pwshPath working for PowerShell entries', async () => {
     const custom = 'D:\\tools\\pwsh.exe'
     const { shell } = await mount({ shell: 'pwsh', pwshPath: custom }, { resolvable: { [custom]: custom } })

@@ -6,14 +6,15 @@
  * own local executor for the running platform: `@deepseek-ai/dsh-pwsh-local` on
  * Windows, `@deepseek-ai/dsh-bash-local` elsewhere. Those two are deliberate
  * mirrors, so one subclass body drives either. This class replaces exactly two
- * things: **which argv** is built, and **the gate** that refuses a call before
- * any process exists.
+ * things: **which argv** is built, and **the decision** that refuses a call
+ * before any process exists.
  *
- * The gate is asynchronous because finding an executable goes through
+ * The decision is asynchronous because finding an executable goes through
  * `ctx.subprocess.resolveExecutable`, the only resolution that is correct in a
  * remote execution world. `resolve()` therefore performs only the defaulting and
  * the per-call policy stamping that must happen synchronously; every refusal
- * lives in `run`/`start`, ahead of confinement and ahead of the spawn.
+ * lives in {@link ShellSelectExecutor.decide}, ahead of confinement and ahead of
+ * the spawn.
  *
  * @module dsh-shell-select/executor
  */
@@ -27,9 +28,8 @@ import {
   isRunnerSpawnFailure,
   matchesSignature,
 } from '@deepseek-ai/dsh-sandbox'
-import { basename } from 'node:path'
 import { buildInvocation, transportEnv } from './dialects.js'
-import { AUTO_SHELL, catalogFor, checkConfinement, findEntry } from './catalog.js'
+import { AUTO_SHELL, catalogFor, checkConfinement, entryClaiming, findEntry, programName } from './catalog.js'
 import { inspectCatalog, inspectShell, requireWorkingDirectory, resolveShell } from './discovery.js'
 
 /** Settings namespace owning the shell selection. */
@@ -40,6 +40,22 @@ const DEFAULT_GRACE_MS = 3_000
 
 /** Default per-stream spill cap; mirrors the local executors'. */
 const DEFAULT_MAX_SPILL_BYTES = 64 * 1024 * 1024
+
+/** Deadline for one plugin-owned version probe, in milliseconds. */
+const PROBE_TIMEOUT_MS = 10_000
+
+/** Per-stream cap for a probe's output: a version line is all it may return. */
+const PROBE_MAX_BYTES = 8_192
+
+/**
+ * Symbol key under which a spawn-ready spec carries the decision it was built
+ * from.
+ *
+ * Enumerable on purpose: the background path hands the spec on as
+ * `{ ...spec, signal }`, and the spread has to carry the decision with it so
+ * the job spawns exactly what was decided rather than deciding again.
+ */
+const DECIDED = Symbol('dsh-shell-select.decided')
 
 /** Every shell id selectable on some platform; the settings schema accepts each. */
 export const SELECTABLE_SHELL_IDS = Object.freeze(
@@ -124,6 +140,29 @@ function localPlatform() {
 }
 
 /**
+ * One call's settings snapshot: the fields a call depends on, copied out of the
+ * live settings section and frozen.
+ *
+ * Every step of one call — entry resolution, executable resolution, validation,
+ * argv construction, launch options — reads this object rather than the live
+ * section, so a settings write that lands while a call is being prepared changes
+ * nothing about that call. The next call reads the next snapshot.
+ * @param settings - the live `shell-select` section.
+ * @returns the frozen snapshot.
+ */
+export function settingsSnapshot(settings) {
+  const text = value => typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
+  return Object.freeze({
+    shell: settings.shell,
+    loginShell: settings.loginShell === true,
+    executable: text(settings.executable),
+    pwshPath: text(settings.pwshPath),
+    wslDistro: text(settings.wslDistro),
+    wslMountRoot: text(settings.wslMountRoot),
+  })
+}
+
+/**
  * Shell executor over the harness's own local process machinery.
  *
  * Registered as `ctx.shell`. Tool calls pass the calling session's resolved
@@ -147,13 +186,21 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
 
   /**
    * Last known selection facts, for the synchronous surfaces — the model-facing
-   * description and the tool's per-call metadata.
+   * description and the card's summary line.
    *
-   * Execution never reads this: the gate resolves afresh on every call, so a
-   * stale entry can make the description briefly wrong but can never make a
-   * command run through a shell the user did not select.
+   * Owned by {@link ShellSelectExecutor.refreshSelection} alone: execution never
+   * writes it and never reads it, so a stale entry can make the description
+   * briefly wrong but can never make a command run through a shell the user did
+   * not select, and can never make a result report one either.
    */
   selection = { platform: localPlatform(), entry: undefined, pending: true }
+
+  /**
+   * Id of the newest selection refresh. A refresh publishes only while it is
+   * still the newest, so two overlapping refreshes cannot let an older, slower
+   * answer overwrite a newer one.
+   */
+  selectionGeneration = 0
 
   /**
    * Resolves once the first {@link ShellSelectExecutor.refreshSelection} settles.
@@ -182,8 +229,8 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
     ctx.inject(['settings'], (settingsCtx) => {
       settingsCtx.settings.installSection(ctx, SHELL_SELECT_NAMESPACE, ShellSelectConfig, config, {
         setSource: (current) => { this.shellSettings = current },
-        // The gate re-reads the seam's platform and the executable on every
-        // call, so a change invalidates nothing but the cached description.
+        // The next call reads the new section through a fresh snapshot; the
+        // cached description and the card are refreshed from here.
         onChange: () => { this.ready = this.refreshSelection() },
       })
     })
@@ -193,10 +240,11 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
   /**
    * The entry the settings name, read without touching the execution world.
    * @param platform - the platform to look the entry up on.
+   * @param settings - the settings snapshot to answer for.
    * @returns the entry, or undefined when the settings name one this platform lacks.
    */
-  provisionalEntry(platform) {
-    const requested = this.shellSettings().shell
+  provisionalEntry(platform, settings = this.selectSettings) {
+    const requested = settings.shell
     if (requested !== AUTO_SHELL) return findEntry(platform, requested)
     // `auto` cannot be answered synchronously: the platform's own default shell
     // comes from the seam. The first catalog entry is the provisional answer.
@@ -222,20 +270,21 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
   }
 
   /**
-   * The configured executable override for an entry.
+   * The executable override in force for one entry.
    *
    * The pre-existing `shell.pwshPath` setting keeps working for PowerShell
    * entries, so a user who already configured it does not configure the same
-   * path twice.
+   * path twice. The `executable` override names one shell — the selected one — so
+   * it is applied to the selected entry and to no other row.
    * @param entry - the catalog entry being resolved.
+   * @param settings - the settings snapshot in force.
+   * @param selected - whether the entry is the one the settings select.
    * @returns the explicit path, or undefined for discovery.
    */
-  configuredPathFor(entry) {
-    const settings = this.selectSettings
-    if (typeof settings.executable === 'string' && settings.executable.trim().length > 0) return settings.executable
+  overrideFor(entry, settings, selected) {
+    if (selected && settings.executable !== undefined) return settings.executable
     if (entry.dialect !== 'powershell') return undefined
-    const inherited = settings.pwshPath
-    return typeof inherited === 'string' && inherited.length > 0 ? inherited : undefined
+    return settings.pwshPath
   }
 
   /** Ask the execution world for its platform, falling back to the local process. */
@@ -258,10 +307,11 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
    * get different sentences: telling a user that a shell named "auto" does not
    * exist on Windows describes the setting rather than the machine.
    * @param platform - the execution platform.
+   * @param settings - the settings snapshot the answer is for.
    * @returns the message a refusal or the cached description reports.
    */
-  unresolvedSelection(platform) {
-    const requested = this.selectSettings.shell
+  unresolvedSelection(platform, settings = this.selectSettings) {
+    const requested = settings.shell
     const known = catalogFor(platform).map(candidate => candidate.id).join(', ')
     if (requested === AUTO_SHELL) {
       return `no shell in the ${platform} catalog resolved in the execution environment `
@@ -279,7 +329,7 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
    *
    * - On POSIX, `ctx.subprocess.terminalEnvironment().defaultShell` is the
    *   user's own login shell (`$SHELL`), a real preference, so a catalog entry
-   *   matching its basename wins.
+   *   matching its program name wins.
    * - On Windows the same field is `%ComSpec%`, which names the command
    *   interpreter rather than a preference — every Windows host reports
    *   `cmd.exe`. Preferring it would contradict the shell the harness's own
@@ -290,27 +340,20 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
    * uninstalled preference is skipped rather than refused.
    * @param platform - the execution platform.
    * @param signal - cancellation of the entry probes.
+   * @param settings - the settings snapshot this resolution answers for.
    * @returns the entry, or undefined when the settings name one this platform lacks.
    */
-  async resolveEntry(platform, signal) {
-    const requested = this.shellSettings().shell
+  async resolveEntry(platform, signal, settings = this.selectSettings) {
+    const requested = settings.shell
     if (requested !== AUTO_SHELL) return findEntry(platform, requested)
     const entries = catalogFor(platform)
-
-    /** The entry claiming a basename, when exactly one catalog row names it. */
-    const entryClaiming = leaf => {
-      const named = entries.filter(entry =>
-        entry.candidates(process.env).some(candidate => basename(candidate).toLowerCase() === leaf))
-      return named.length === 1 ? named[0] : undefined
-    }
 
     // An explicit executable under `auto` names its own dialect: a user with
     // `/opt/custom/bash` means bash, not whichever row happens to lead the
     // catalog. Without this, `auto` plus an override would pair the override
     // with the wrong argument dialect.
-    const configured = this.selectSettings.executable
-    if (typeof configured === 'string' && configured.trim().length > 0) {
-      const claimed = entryClaiming(basename(configured.trim()).toLowerCase())
+    if (settings.executable !== undefined) {
+      const claimed = entryClaiming(platform, programName(settings.executable))
       if (claimed !== undefined) return claimed
     }
 
@@ -336,16 +379,20 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
         defaultShell = undefined
       }
       if (typeof defaultShell === 'string' && defaultShell.length > 0) {
-        const preferred = entryClaiming(basename(defaultShell).toLowerCase())
+        const preferred = entryClaiming(platform, programName(defaultShell))
         if (preferred !== undefined) {
-          const inspection = await inspectShell(this.ctx, { entry: preferred, configuredPath: undefined, env: undefined, signal })
+          const inspection = await inspectShell(this.ctx, {
+            entry: preferred, configuredPath: undefined, env: undefined, signal, platform,
+          })
           if (inspection.available === true) return preferred
         }
       }
     }
 
     for (const entry of entries) {
-      const inspection = await inspectShell(this.ctx, { entry, configuredPath: undefined, env: undefined, signal })
+      const inspection = await inspectShell(this.ctx, {
+        entry, configuredPath: undefined, env: undefined, signal, platform,
+      })
       if (inspection.available === true) return entry
     }
     return undefined
@@ -353,22 +400,31 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
 
   /**
    * Refresh the cached selection facts from the execution world.
-   * @returns the refreshed cache entry.
+   *
+   * Overlapping refreshes are expected — a settings write during a first read,
+   * or several writes in quick succession — so each call carries a generation
+   * and only the newest publishes. An older refresh that settles later leaves
+   * the newer facts in place instead of overwriting them.
+   * @returns the published cache entry.
    */
   async refreshSelection() {
-    const settings = this.selectSettings
+    const generation = ++this.selectionGeneration
+    const settings = settingsSnapshot(this.selectSettings)
     const platform = await this.executionPlatformNow()
-    const entry = await this.resolveEntry(platform, undefined)
-    if (entry === undefined) {
-      this.selection = { platform, detail: this.unresolvedSelection(platform) }
-      return this.selection
-    }
-    const inspection = await inspectShell(this.ctx, {
-      entry,
-      configuredPath: this.configuredPathFor(entry),
-      env: undefined,
-    })
-    this.selection = { platform, entry, ...inspection }
+    const entry = await this.resolveEntry(platform, undefined, settings)
+    const next = entry === undefined
+      ? { platform, detail: this.unresolvedSelection(platform, settings) }
+      : {
+        platform,
+        entry,
+        ...await inspectShell(this.ctx, {
+          entry,
+          configuredPath: this.overrideFor(entry, settings, true),
+          env: undefined,
+          platform,
+        }),
+      }
+    if (generation === this.selectionGeneration) this.selection = next
     return this.selection
   }
 
@@ -405,10 +461,11 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
    */
   async describeCatalog(options = {}) {
     const platform = await this.executionPlatformNow()
-    const resolved = await this.resolveEntry(platform, undefined)
+    const settings = settingsSnapshot(this.selectSettings)
+    const selected = await this.resolveEntry(platform, undefined, settings)
     return inspectCatalog(this.ctx, platform, {
-      selectedId: resolved?.id,
-      configuredPath: this.shellSettings().executable,
+      selectedId: selected?.id,
+      overrideFor: (entry, isSelected) => this.overrideFor(entry, settings, isSelected),
       env: options.env,
     })
   }
@@ -417,10 +474,11 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
    * Resolve a request into a spec: the inherited defaulting, the per-call
    * sandbox policy, and the transport environment the chosen dialect needs.
    *
-   * Deliberately free of refusals. Every check that can fail lives in `run` and
-   * `start`, because finding an executable is asynchronous.
+   * Deliberately free of refusals. Every check that can fail lives in
+   * {@link ShellSelectExecutor.decide}, because finding an executable is
+   * asynchronous.
    * @param request - the caller's request.
-   * @returns the spec to hand to `run`/`start`.
+   * @returns the spec to hand to `decide`/`run`/`start`.
    */
   resolve(request) {
     const base = super.resolve(request)
@@ -428,27 +486,40 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
   }
 
   /**
-   * Refuse or clear one call, before confinement and before any process exists.
+   * Decide one call, before confinement and before any process exists.
+   *
+   * Everything the call depends on is fixed here, from ONE settings snapshot:
+   * the entry, the executable, the working-directory validation, the refusal for
+   * an unenforceable mode, the launch options, and the argv. Callers that need
+   * the facts before the process starts — the tool's per-call metadata — take
+   * them from this decision, and `run`/`start` reuse the marked spec rather than
+   * deciding again, so the facts and the process can never disagree.
    *
    * Order is deliberate: the platform and the entry decide whether the request
    * is even expressible, confinement decides whether it may run, and only then
    * are the working directory and the executable resolved.
    * @param spec - the spec about to run.
-   * @returns the entry, its resolved executable, and the platform.
+   * @returns the frozen decision and the spawn-ready spec carrying it.
    * @throws {ShellSelectionRefusedError} when the mode cannot be enforced for this shell.
    * @throws {Error} when the selection, the working directory, or the executable is unusable.
    */
-  async gate(spec) {
-    const settings = this.selectSettings
+  async decide(spec) {
+    const settings = settingsSnapshot(this.selectSettings)
     const platform = await this.executionPlatformNow()
-    const entry = await this.resolveEntry(platform, spec.signal)
+    const entry = await this.resolveEntry(platform, spec.signal, settings)
     if (entry === undefined) {
-      throw new Error(`dsh-shell-select: ${this.unresolvedSelection(platform)}`)
+      throw new Error(`dsh-shell-select: ${this.unresolvedSelection(platform, settings)}`)
     }
-    if (settings.loginShell === true && entry.dialect !== 'bash' && entry.dialect !== 'wsl') {
+    if (settings.loginShell && entry.dialect !== 'bash' && entry.dialect !== 'wsl') {
       throw new Error(
         `dsh-shell-select: "loginShell" applies to bash-family shells only; ${entry.label} uses the `
         + `${entry.dialect} dialect`,
+      )
+    }
+    if (entry.dialect === 'wsl' && !String(settings.wslMountRoot ?? '').startsWith('/')) {
+      throw new Error(
+        'dsh-shell-select: "wslMountRoot" must be an absolute Linux path, got '
+        + `${JSON.stringify(settings.wslMountRoot ?? null)}`,
       )
     }
     const policy = spec.sandboxPolicy
@@ -460,32 +531,62 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
     requireWorkingDirectory(spec.workdir, platform)
     const resolved = await resolveShell(this.ctx, {
       entry,
-      configuredPath: this.configuredPathFor(entry),
+      configuredPath: this.overrideFor(entry, settings, true),
       env: undefined,
       signal: spec.signal,
+      platform,
     })
-    this.selection = { platform, entry, available: true, path: resolved.path, source: resolved.source }
-    // The gate stamps the transport environment because only it knows the
-    // resolved entry, and `resolve()` cannot: choosing a shell may require
-    // probing the execution world. Stamping here keeps one home for the fact.
-    const transport = transportEnv(entry.dialect, spec.command)
-    const stamped = transport === undefined ? spec : { ...spec, env: { ...spec.env, ...transport } }
-    return { platform, entry, executable: resolved.path, spec: stamped }
-  }
-
-  /** Build one call's argv from the gate's answer. */
-  invocationFor(spec, gated) {
-    const settings = this.selectSettings
-    return buildInvocation(gated.entry.dialect, {
-      executable: gated.executable,
+    const argv = buildInvocation(entry.dialect, {
+      executable: resolved.path,
       command: spec.command,
-      ...gated.entry.dialect === 'wsl' ? {
+      ...entry.dialect === 'wsl' ? {
         windowsCwd: spec.workdir,
         mountRoot: settings.wslMountRoot,
         distro: settings.wslDistro,
       } : {},
       loginShell: settings.loginShell,
+    }).argv
+    // The decision stamps the transport environment because only it knows the
+    // resolved entry, and `resolve()` cannot: choosing a shell may require
+    // probing the execution world. Stamping here keeps one home for the fact.
+    const transport = transportEnv(entry.dialect, spec.command)
+    const spawnSpec = transport === undefined ? spec : { ...spec, env: { ...spec.env, ...transport } }
+    const capability = entry.confineable ?? { confined: true }
+    const decision = Object.freeze({
+      platform,
+      entry,
+      executable: resolved.path,
+      source: resolved.source,
+      argv,
+      settings,
+      shell: Object.freeze({
+        id: entry.id,
+        label: entry.label,
+        dialect: entry.dialect,
+        platform,
+        executable: resolved.path,
+        source: resolved.source,
+        workdir: spec.workdir,
+        loginShell: settings.loginShell,
+        confineable: capability.confined,
+      }),
     })
+    return { decision, spec: { ...spawnSpec, [DECIDED]: decision } }
+  }
+
+  /**
+   * The decision a spec carries, or a fresh one when it carries none.
+   *
+   * `run`/`start` are reachable without a prior `decide` — another caller may
+   * hold only the seam's `resolve` — so both go through here. A spec that
+   * already carries a decision is used exactly as decided: a settings write
+   * between the decision and the spawn changes the next call, not this one.
+   * @param spec - a spec from {@link ShellSelectExecutor.resolve}, decided or not.
+   * @returns the decision and the spawn-ready spec.
+   */
+  async decideFor(spec) {
+    const carried = spec[DECIDED]
+    return carried === undefined ? await this.decide(spec) : { decision: carried, spec }
   }
 
   /**
@@ -494,28 +595,26 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
    * @returns the foreground result with its sandbox facts.
    */
   async run(spec) {
-    const gated = await this.gate(spec)
-    const { spec: gatedSpec, entry, executable } = gated
-    const mode = gatedSpec.sandboxPolicy.mode
-    const argv = this.invocationFor(gatedSpec, { entry, executable }).argv
+    const { decision, spec: decidedSpec } = await this.decideFor(spec)
+    const mode = decidedSpec.sandboxPolicy.mode
     if (mode === 'danger-full-access') {
-      const { result } = await this.runArgv(gatedSpec, argv)
+      const { result } = await this.runArgv(decidedSpec, decision.argv)
       return { ...result, sandbox: { mode, denied: false } }
     }
     let confined
     let result
     let spawnRequested
     try {
-      ({ result, spawnRequested } = await this.runArgv(gatedSpec, async (signal) => {
-        const prepared = await this.ctx.sandbox.confine(argv, { ...gatedSpec.sandboxPolicy, mode }, signal)
+      ({ result, spawnRequested } = await this.runArgv(decidedSpec, async (signal) => {
+        const prepared = await this.ctx.sandbox.confine(decision.argv, { ...decidedSpec.sandboxPolicy, mode }, signal)
         signal.throwIfAborted()
         confined = prepared
         return prepared.argv
       }))
     } catch (error) {
       // An upstream abort remains cancellation even when it prevents spawn.
-      if (gatedSpec.signal?.aborted === true) gatedSpec.signal.throwIfAborted()
-      if (confined !== undefined && isRunnerSpawnFailure(error, confined.argv[0], gatedSpec.workdir)) {
+      if (decidedSpec.signal?.aborted === true) decidedSpec.signal.throwIfAborted()
+      if (confined !== undefined && isRunnerSpawnFailure(error, confined.argv[0], decidedSpec.workdir)) {
         throw new SandboxUnavailableError(mode, String(error))
       }
       throw error
@@ -536,23 +635,114 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
   }
 
   /**
+   * Run one plugin-owned argv — a version probe — for the settings card.
+   *
+   * The probe is not special-cased past the sandbox: it goes through the same
+   * `ctx.sandbox.confine` an ordinary command does, under the deployment's own
+   * resolved policy, and when the mode cannot confine the executable it is
+   * refused and reported rather than started unconfined. That keeps a
+   * configurable executable path from becoming an unrestricted execution
+   * channel just because the arguments are fixed.
+   *
+   * `danger-full-access` is the one case with no confinement to apply, exactly
+   * as for an ordinary command: the user chose unconfined execution for this
+   * deployment.
+   * @param argv - the fixed argv to run; never carries caller or model input.
+   * @param signal - cancellation for the probe.
+   * @returns the settled facts: the exit status, the output, and what was observed.
+   */
+  async runProbe(argv, signal) {
+    const platform = await this.executionPlatformNow()
+    const policy = this.ctx.sandboxPolicy.resolve()
+    // The sandbox grants access to the policy's workspace, so that is where a
+    // probe runs. A workspace that does not exist is reported, never replaced
+    // with another directory.
+    let workdir
+    try {
+      workdir = requireWorkingDirectory(policy.workspaceRoot, platform)
+    } catch (error) {
+      return { started: false, detail: `probe not run: ${error instanceof Error ? error.message : String(error)}` }
+    }
+    const probeSpec = this.resolve({
+      command: '',
+      workdir,
+      timeoutMs: PROBE_TIMEOUT_MS,
+      stdoutMaxBytes: PROBE_MAX_BYTES,
+      ...signal === undefined ? {} : { signal },
+    })
+    let result
+    let spawnRequested
+    let confined
+    try {
+      if (policy.mode === 'danger-full-access') {
+        ({ result, spawnRequested } = await this.runArgv(probeSpec, argv))
+      } else {
+        ({ result, spawnRequested } = await this.runArgv(probeSpec, async (innerSignal) => {
+          const prepared = await this.ctx.sandbox.confine(argv, policy, innerSignal)
+          innerSignal.throwIfAborted()
+          confined = prepared
+          return prepared.argv
+        }))
+      }
+    } catch (error) {
+      // fail closed: a probe the policy cannot confine is reported, not run.
+      return {
+        started: false,
+        mode: policy.mode,
+        detail: error instanceof Error ? error.message : String(error),
+        ...error instanceof SandboxUnavailableError ? { refused: true } : {},
+      }
+    }
+    if (!spawnRequested) {
+      return { started: false, mode: policy.mode, detail: `the probe timed out after ${PROBE_TIMEOUT_MS} ms` }
+    }
+    const facts = confined
+    if (facts !== undefined) {
+      const runnerFailure = classifyRunnerFailure(result.exitCode, result.stderr.text, facts.runnerFailureRules)
+      if (runnerFailure !== undefined) {
+        return {
+          started: true,
+          mode: policy.mode,
+          runnerFailed: true,
+          enforcement: facts.enforcement,
+          detail: runnerFailure.detail,
+        }
+      }
+    }
+    return {
+      started: true,
+      mode: policy.mode,
+      exitCode: result.exitCode,
+      stdout: result.stdout.text.replace(/\0/gu, ''),
+      stderr: result.stderr.text.replace(/\0/gu, ''),
+      ...facts === undefined ? {} : {
+        enforcement: facts.enforcement,
+        denied: matchesSignature(result.exitCode, result.stderr.text, facts.denialSignatures),
+      },
+      ...result.timedOut ? { timedOut: true } : {},
+    }
+  }
+
+  /**
    * Start one background command, confined unless the mode is `danger-full-access`.
-   * @param spec - a spec from {@link ShellSelectExecutor.resolve}.
+   * @param spec - a spec from {@link ShellSelectExecutor.resolve}, decided or not.
    * @returns the live process handle.
    */
   async start(spec) {
-    const gated = await this.gate(spec)
-    const { spec: gatedSpec, entry, executable } = gated
-    const mode = gatedSpec.sandboxPolicy.mode
-    const argv = this.invocationFor(gatedSpec, { entry, executable }).argv
-    if (mode === 'danger-full-access') return this.startArgv(gatedSpec, argv)
-    const confined = await this.ctx.sandbox.confine(argv, { ...gatedSpec.sandboxPolicy, mode }, gatedSpec.signal)
-    gatedSpec.signal?.throwIfAborted()
+    const { decision, spec: decidedSpec } = await this.decideFor(spec)
+    const mode = decidedSpec.sandboxPolicy.mode
+    if (mode === 'danger-full-access') return this.startArgv(decidedSpec, decision.argv)
+    const confined = await this.ctx.sandbox.confine(
+      decision.argv,
+      { ...decidedSpec.sandboxPolicy, mode },
+      decidedSpec.signal,
+    )
+    decidedSpec.signal?.throwIfAborted()
     let proc
     try {
-      proc = this.startArgv(gatedSpec, confined.argv)
+      proc = this.startArgv(decidedSpec, confined.argv)
     } catch (error) {
-      if (isRunnerSpawnFailure(error, confined.argv[0], gatedSpec.workdir)) {
+      if (isRunnerSpawnFailure(error, confined.argv[0], decidedSpec.workdir)) {
         throw new SandboxUnavailableError(mode, String(error))
       }
       throw error
@@ -563,7 +753,7 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
       denialSignatures: confined.denialSignatures,
       runnerFailureRules: confined.runnerFailureRules,
       runnerProgram: confined.argv[0],
-      workdir: gatedSpec.workdir,
+      workdir: decidedSpec.workdir,
     })
     return proc
   }

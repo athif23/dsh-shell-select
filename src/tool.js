@@ -211,15 +211,37 @@ export function registerShellTool(ctx, options) {
     return modelWorkdir
   }
 
-  /** The `shell` fact block persisted with every result, for the UI's call details. */
-  const shellFact = workdir => {
+  /**
+   * The `shell` fact block persisted with every result.
+   *
+   * Taken from the call's own decision, so the transcript records the shell,
+   * executable, and working directory that actually produced the process — even
+   * when the selection changed between the model's call and the spawn.
+   * @param decision - the decision `decide` returned for this call.
+   * @returns the fact block for the tool result.
+   */
+  const decisionFact = decision => ({
+    shell: decision.shell.id,
+    label: decision.shell.label,
+    platform: decision.shell.platform,
+    executable: decision.shell.executable,
+    workdir: decision.shell.workdir,
+  })
+
+  /**
+   * The same fact block for the *call preview*, before the decision exists.
+   *
+   * A preview can only read the cached description, because nothing is decided
+   * yet; it is what the card shows while the command is running, and the result
+   * replaces it with the decision's own facts.
+   */
+  const previewFact = () => {
     const describe = describeShell()
     return {
       shell: describe.id,
       label: describe.label,
       platform: describe.platform,
       ...describe.available ? { executable: describe.executable } : {},
-      ...workdir === undefined ? {} : { workdir },
     }
   }
 
@@ -327,7 +349,6 @@ export function registerShellTool(ctx, options) {
         : undefined
       const policy = approvedMode === undefined ? standingPolicy : { ...standingPolicy, mode: approvedMode }
       const workdir = resolveWorkdir(args.workdir, exec, standingPolicy?.workspaceRoot)
-      const shell = shellFact(workdir)
       const request = {
         command: args.command,
         ...workdir !== undefined ? { workdir } : {},
@@ -350,21 +371,29 @@ export function registerShellTool(ctx, options) {
           error.name = 'AbortError'
           throw error
         }
+        // Decided before admission: the job spawns exactly what the result
+        // names, and a refused selection fails the call instead of creating a
+        // job that fails on its first tick. The job's own controller owns
+        // cancellation, so the spec carries no tool-call signal.
+        const decided = await ctx.shell.decide(ctx.shell.resolve(request))
         // Task preflight finishes before the starter can spawn a process.
         const id = jobs.start({
           kind: SHELL_TOOL_NAME,
           label: args.command,
           ...exec.agent ? { owner: exec.agent } : {},
           run: () => processJob(
-            signal => ctx.shell.start(ctx.shell.resolve({ ...request, signal })),
+            signal => ctx.shell.start({ ...decided.spec, signal }),
             proc => renderShellProcessRead(proc.readOutput(), proc.sandbox, escalationModes),
           ),
         })
-        return { kind: 'background', jobId: id, shell }
+        return { kind: 'background', jobId: id, shell: decisionFact(decided.decision) }
       }
 
-      // A refused selection throws from run() here, before any process exists.
-      const result = await ctx.shell.run(ctx.shell.resolve({ ...request, signal: exec.signal }))
+      // One decision for this call: it refuses an unusable selection before any
+      // process exists, and it fixes the shell, the executable, and the argv
+      // that `run` then spawns, so the reported facts cannot drift from it.
+      const decided = await ctx.shell.decide(ctx.shell.resolve({ ...request, signal: exec.signal }))
+      const result = await ctx.shell.run(decided.spec)
       if (result.aborted) {
         const error = new HarnessError('tool call aborted', TOOL_ABORTED)
         error.name = 'AbortError'
@@ -377,7 +406,7 @@ export function registerShellTool(ctx, options) {
         timedOut: result.timedOut,
         aborted: result.aborted,
         timeoutMs: result.timeoutMs,
-        shell,
+        shell: decisionFact(decided.decision),
         stdout: {
           text: result.stdout.text,
           truncated: result.stdout.truncated,
@@ -399,9 +428,10 @@ export function registerShellTool(ctx, options) {
       }
     },
     // The call card names the shell and the working directory up front, so a
-    // user reading the transcript sees which shell will run the command.
+    // user reading the transcript sees which shell will run the command. This is
+    // the cached selection: the call has not been decided yet.
     presentCall: (args) => {
-      const shell = describeShellFact(shellFact(undefined))
+      const shell = describeShellFact(previewFact())
       return args.run_in_background === true
         ? {
           card: 'generic',

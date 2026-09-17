@@ -20,6 +20,19 @@
 import { candidatePwshPaths } from '@deepseek-ai/dsh-pwsh-local'
 import { join } from 'node:path'
 
+/**
+ * The program name in a path, for either platform's separators.
+ *
+ * `node:path`'s own `basename` splits on the separators of the platform it runs
+ * on, and a resolved path can come from a remote execution world whose
+ * separators differ from the local process's.
+ * @param candidate - a path or bare command name.
+ * @returns its last path segment.
+ */
+export function programName(candidate) {
+  return candidate.split(/[\\/]/u).pop() ?? candidate
+}
+
 /** Execution-world platform words, as `ctx.subprocess.terminalEnvironment` reports them. */
 export const PLATFORMS = Object.freeze(['windows', 'posix'])
 
@@ -133,6 +146,15 @@ function powershellCandidates(env, pick) {
 /**
  * The per-platform catalogs.
  *
+ * `names` is the entry's identity: the program names that mean *this* shell. It
+ * is what {@link checkIdentity} uses to refuse a configured executable that
+ * names a different entry, so an override given for one shell can never be
+ * paired with another shell's launch arguments.
+ *
+ * `probe` overrides how the entry answers the card's version question. The
+ * default is the dialect's own version query; an entry whose family has no
+ * version flag declares its own harmless query instead.
+ *
  * `confineable` states only what has been measured: the Windows ACL
  * restricted-token runner cannot start an MSYS2 shell or a WSL instance, so
  * those two entries carry a refusal reason. Everywhere else confinement wraps
@@ -144,6 +166,7 @@ const ENTRIES = {
       id: 'pwsh',
       label: 'PowerShell',
       dialect: 'powershell',
+      names: ['pwsh.exe'],
       syntax: 'PowerShell syntax and native Windows paths (C:\\dir\\file). '
         + '`$env:NAME` reads environment variables; `|`, `>` and `;` chain and redirect. '
         + 'Runs with -NoProfile -NonInteractive: no profile script loads and no interactive state persists. ',
@@ -154,6 +177,7 @@ const ENTRIES = {
       id: 'powershell',
       label: 'Windows PowerShell 5.1',
       dialect: 'powershell',
+      names: ['powershell.exe'],
       syntax: 'PowerShell syntax and native Windows paths (C:\\dir\\file). '
         + '`$env:NAME` reads environment variables. Windows PowerShell 5.1, the version shipped with Windows; '
         + 'runs with -NoProfile -NonInteractive. Non-ASCII output is pinned to UTF-8 by the launcher. ',
@@ -164,6 +188,7 @@ const ENTRIES = {
       id: 'cmd',
       label: 'Command Prompt (cmd.exe)',
       dialect: 'cmd',
+      names: ['cmd.exe'],
       syntax: 'cmd.exe syntax and native Windows paths (C:\\dir\\file). '
         + 'Redirection uses `>`/`>>` and `&` chains commands; quote every path containing spaces. '
         + 'IMPORTANT: `%NAME%` is NOT expanded — the command reaches cmd in one pass, so write `call ...` '
@@ -176,6 +201,7 @@ const ENTRIES = {
       id: 'gitbash',
       label: 'Git Bash',
       dialect: 'bash',
+      names: ['bash.exe'],
       syntax: 'Bash syntax with MSYS path translation: Windows drives appear as /c/..., /d/..., '
         + 'and the workspace is reached the same way. `$NAME` reads environment variables. '
         + 'Runs the real bash.exe, never the git-bash.exe GUI launcher. ',
@@ -184,7 +210,7 @@ const ENTRIES = {
       // The GUI launcher would open a window instead of running the command.
       accept: candidate => /(^|[\\/])bash\.exe$/iu.test(candidate)
         ? { ok: true }
-        : { ok: false, detail: 'expected bash.exe, got ' + candidate.split(/[\\/]/u).pop() },
+        : { ok: false, detail: 'expected bash.exe, got ' + programName(candidate) },
       confineable: {
         confined: false,
         reason: 'MSYS2 bash cannot start under the Windows restricted token: its runtime aborts with '
@@ -195,6 +221,7 @@ const ENTRIES = {
       id: 'wsl',
       label: 'WSL Bash',
       dialect: 'wsl',
+      names: ['wsl.exe'],
       syntax: 'Linux Bash syntax and LINUX paths only — the Windows workspace is mounted at '
         + '/mnt/<drive>/... (for example D:\\work becomes /mnt/d/work). Windows-style paths (C:\\...) are '
         + 'NOT valid here. Runs inside the WSL distribution. ',
@@ -223,6 +250,7 @@ const ENTRIES = {
       id: 'bash',
       label: 'Bash',
       dialect: 'bash',
+      names: ['bash'],
       syntax: POSIX_SHELL_SYNTAX,
       candidates: () => ['bash'],
       supportsLoginShell: true,
@@ -232,6 +260,7 @@ const ENTRIES = {
       id: 'zsh',
       label: 'Zsh',
       dialect: 'bash',
+      names: ['zsh'],
       syntax: POSIX_SHELL_SYNTAX,
       candidates: () => ['zsh'],
       supportsLoginShell: false,
@@ -241,6 +270,7 @@ const ENTRIES = {
       id: 'fish',
       label: 'Fish',
       dialect: 'bash',
+      names: ['fish'],
       syntax: 'Fish syntax: it is NOT POSIX — `set NAME value` assigns a variable rather than `NAME=value`, '
         + 'and `$NAME` reads one. Pipes and redirection behave as in other shells. '
         + 'Each call is a fresh non-interactive process: no state persists between calls. ',
@@ -252,15 +282,21 @@ const ENTRIES = {
       id: 'sh',
       label: 'POSIX sh',
       dialect: 'bash',
+      names: ['sh', 'dash', 'ash'],
       syntax: POSIX_SHELL_SYNTAX + 'This is the system `sh`, which may be dash rather than bash; avoid bash-only syntax. ',
       candidates: () => ['sh'],
       supportsLoginShell: false,
       confineable: { confined: true },
+      // `dash --version` is an illegal option (exit 2, message on stderr), so a
+      // version query reports the failure rather than the shell. `$0` answers
+      // with the implementation's own name, which is the useful fact here.
+      probe: { kind: 'interpreter', argv: executable => [executable, '-c', 'echo "$0"'] },
     },
     {
       id: 'pwsh',
       label: 'PowerShell',
       dialect: 'powershell',
+      names: ['pwsh'],
       syntax: 'PowerShell syntax and POSIX paths. `$env:NAME` reads environment variables; '
         + '`|`, `>` and `;` chain and redirect. Runs with -NoProfile -NonInteractive. ',
       candidates: () => ['pwsh'],
@@ -318,11 +354,60 @@ export function checkConfinement(entry, mode) {
 }
 
 /**
- * The identity guard for a resolved executable, when the entry declares one.
- * @param entry - a catalog entry.
+ * The entry a program name identifies on a platform, when exactly one names it.
+ * @param platform - `'windows'` or `'posix'`.
+ * @param program - a bare program name, e.g. `bash.exe`.
+ * @returns the claiming entry, or undefined when none or several claim it.
+ */
+export function entryClaiming(platform, program) {
+  const leaf = program.toLowerCase()
+  const claimed = catalogFor(platform).filter(entry => entry.names.some(name => name.toLowerCase() === leaf))
+  return claimed.length === 1 ? claimed[0] : undefined
+}
+
+/**
+ * The identity guard for a resolved executable.
+ *
+ * Two checks, in order:
+ *
+ * 1. A resolved path whose program name identifies a *different* catalog entry
+ *    is refused. This is what stops an executable override configured for one
+ *    shell from being reused with another shell's launch arguments — the pair
+ *    (`cmd.exe`, `-c command`) cannot be produced by a stale override.
+ * 2. The entry's own `accept`, where it declares one, which rejects a program of
+ *    the right family but the wrong kind (Git for Windows' GUI launcher).
+ *
+ * A program name no entry claims is accepted: an override naming a shell this
+ * catalog does not know is the user saying which shell their binary is, and
+ * refusing it would break relocated or renamed installs without preventing any
+ * wrong pairing.
+ * @param entry - the catalog entry that asked for the executable.
  * @param resolved - the path the execution world resolved.
+ * @param platform - `'windows'` or `'posix'`, selecting the sibling entries.
  * @returns the verdict, with a diagnostic when the path is the wrong program.
  */
-export function checkIdentity(entry, resolved) {
+export function checkIdentity(entry, resolved, platform) {
+  const leaf = programName(resolved)
+  const own = entry.names.some(name => name.toLowerCase() === leaf.toLowerCase())
+  const claimed = entryClaiming(platform, leaf)
+  if (!own && claimed !== undefined && claimed.id !== entry.id) {
+    return {
+      ok: false,
+      detail: `expected ${entry.names.join(' or ')}, got ${leaf} — that is ${claimed.label}`,
+    }
+  }
   return entry.accept === undefined ? { ok: true } : entry.accept(resolved)
+}
+
+/**
+ * The argument vector probing an entry's version, or its own identity where the
+ * family has no version flag.
+ * @param entry - a catalog entry.
+ * @param executable - the resolved executable.
+ * @param dialectDefault - the dialect's own version query.
+ * @returns the argv to spawn and the kind of answer to expect.
+ */
+export function probeFor(entry, executable, dialectDefault) {
+  if (entry.probe !== undefined) return { kind: entry.probe.kind, argv: entry.probe.argv(executable) }
+  return { kind: 'version', argv: dialectDefault(entry.dialect, executable) }
 }

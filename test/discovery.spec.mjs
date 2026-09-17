@@ -36,7 +36,7 @@ describe('resolveShell', () => {
     // The seam resolves a bare NAME to the canonical path, so the stub's table
     // is keyed by name exactly as the real provider's PATH lookup answers.
     const { ctx, subprocess } = await contextWith({ bash: '/usr/bin/bash' })
-    const resolved = await resolveShell(ctx, { entry: findEntry('posix', 'bash'), env: { PATH: '/usr/bin' } })
+    const resolved = await resolveShell(ctx, { entry: findEntry('posix', 'bash'), platform: 'posix', env: { PATH: '/usr/bin' } })
     assert.deepEqual(resolved, { path: '/usr/bin/bash', source: 'discovered' })
     // The entry's own candidate list was what got asked, in order.
     assert.deepEqual(subprocess.resolutions, ['bash'])
@@ -47,6 +47,7 @@ describe('resolveShell', () => {
     const resolved = await resolveShell(ctx, {
       entry: findEntry('posix', 'bash'),
       configuredPath: '/opt/custom/bash',
+      platform: 'posix',
       env: {},
     })
     assert.deepEqual(resolved, { path: '/opt/custom/bash', source: 'configured' })
@@ -58,7 +59,9 @@ describe('resolveShell', () => {
     // user asked for, so a wrong one is an error rather than a reason to guess.
     const { ctx, subprocess } = await contextWith({ bash: '/usr/bin/bash' })
     await assert.rejects(
-      () => resolveShell(ctx, { entry: findEntry('posix', 'bash'), configuredPath: '/nope/bash', env: {} }),
+      () => resolveShell(ctx, {
+        entry: findEntry('posix', 'bash'), configuredPath: '/nope/bash', platform: 'posix', env: {},
+      }),
       /configured executable for Bash is not an executable file/u,
     )
     assert.deepEqual(subprocess.resolutions, ['/nope/bash'])
@@ -70,33 +73,49 @@ describe('resolveShell', () => {
       () => resolveShell(ctx, {
         entry: findEntry('windows', 'gitbash'),
         configuredPath: 'D:\\Git\\git-bash.exe',
+        platform: 'windows',
         env: {},
       }),
       /is not that shell — expected bash\.exe/u,
     )
   })
 
+  it('fails an override that names a different catalog entry', async () => {
+    // The rule that stops one shell's override from being paired with another
+    // shell's launch arguments: a cmd.exe path can never be run as `cmd.exe -c`.
+    const { ctx } = await contextWith({ 'C:\\Windows\\system32\\cmd.exe': 'C:\\Windows\\system32\\cmd.exe' })
+    await assert.rejects(
+      () => resolveShell(ctx, {
+        entry: findEntry('windows', 'gitbash'),
+        configuredPath: 'C:\\Windows\\system32\\cmd.exe',
+        platform: 'windows',
+        env: {},
+      }),
+      /expected bash\.exe, got cmd\.exe — that is Command Prompt \(cmd\.exe\)/u,
+    )
+  })
+
   it('raises when discovery finds nothing, naming every probed location', async () => {
     const { ctx } = await contextWith({})
     await assert.rejects(
-      () => resolveShell(ctx, { entry: findEntry('posix', 'zsh'), env: {} }),
+      () => resolveShell(ctx, { entry: findEntry('posix', 'zsh'), platform: 'posix', env: {} }),
       /no Zsh executable found in the execution environment; set "executable"/u,
     )
   })
 
   it('never returns a bare name for something else to resolve later', async () => {
     const { ctx } = await contextWith({})
-    await assert.rejects(() => resolveShell(ctx, { entry: findEntry('posix', 'sh'), env: {} }))
+    await assert.rejects(() => resolveShell(ctx, { entry: findEntry('posix', 'sh'), platform: 'posix', env: {} }))
   })
 
   it('inspects without throwing', async () => {
     const found = await contextWith({ bash: '/bin/bash' })
     assert.deepEqual(
-      await inspectShell(found.ctx, { entry: findEntry('posix', 'bash'), env: {} }),
+      await inspectShell(found.ctx, { entry: findEntry('posix', 'bash'), platform: 'posix', env: {} }),
       { available: true, path: '/bin/bash', source: 'discovered' },
     )
     const missing = await contextWith({})
-    const inspection = await inspectShell(missing.ctx, { entry: findEntry('posix', 'bash'), env: {} })
+    const inspection = await inspectShell(missing.ctx, { entry: findEntry('posix', 'bash'), platform: 'posix', env: {} })
     assert.equal(inspection.available, false)
     assert.match(inspection.detail, /no Bash executable found/u)
   })
@@ -105,7 +124,7 @@ describe('resolveShell', () => {
 describe('inspectCatalog', () => {
   it('reports one row per entry with the selection marked', async () => {
     const { ctx } = await contextWith({ bash: '/bin/bash', zsh: '/bin/zsh' })
-    const rows = await inspectCatalog(ctx, 'posix', { selectedId: 'bash', configuredPath: undefined, env: {} })
+    const rows = await inspectCatalog(ctx, 'posix', { selectedId: 'bash', overrideFor: () => undefined, env: {} })
     assert.deepEqual(rows.map(row => row.id), ['bash', 'zsh', 'fish', 'sh', 'pwsh'])
     assert.deepEqual(rows.filter(row => row.selected).map(row => row.id), ['bash'])
     assert.equal(rows.find(row => row.id === 'bash').available, true)
@@ -117,7 +136,7 @@ describe('inspectCatalog', () => {
   it('applies the configured path to the selected entry only', async () => {
     // Otherwise one override would report the same file as four different shells.
     const { ctx, subprocess } = await contextWith({ '/opt/zsh': '/opt/zsh', bash: '/bin/bash' })
-    const rows = await inspectCatalog(ctx, 'posix', { selectedId: 'zsh', configuredPath: '/opt/zsh', env: {} })
+    const rows = await inspectCatalog(ctx, 'posix', { selectedId: 'zsh', overrideFor: (entry, selected) => selected ? '/opt/zsh' : undefined, env: {} })
     assert.equal(rows.find(row => row.id === 'zsh').path, '/opt/zsh')
     assert.equal(rows.find(row => row.id === 'bash').path, '/bin/bash')
     const overrideProbes = subprocess.resolutions.filter(entry => entry === '/opt/zsh').length
@@ -126,7 +145,7 @@ describe('inspectCatalog', () => {
 
   it('carries the measured refusal reason for an unconfineable Windows entry', async () => {
     const { ctx } = await contextWith({}, 'windows')
-    const rows = await inspectCatalog(ctx, 'windows', { selectedId: 'cmd', configuredPath: undefined, env: {} })
+    const rows = await inspectCatalog(ctx, 'windows', { selectedId: 'cmd', overrideFor: () => undefined, env: {} })
     const gitbash = rows.find(row => row.id === 'gitbash')
     assert.equal(gitbash.confineable, false)
     assert.match(gitbash.confineReason, /MSYS2|restricted token/u)

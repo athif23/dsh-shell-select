@@ -7,26 +7,35 @@
  * under the session's permission mode. Those are computed here and served over
  * two read-only routes.
  *
- * **Probes run fixed, plugin-owned argv.** {@link probeVersion} spawns a version
- * query through `ctx.subprocess` and never carries user, model, or request
- * input, so the routes above it cannot be turned into a command channel. The
- * probe is deliberately unconfined: it reports environment facts, and a version
- * query the sandbox refused would report the sandbox rather than the shell.
+ * **Probes run fixed, plugin-owned argv, under the deployment's own confinement.**
+ * {@link ./dialects.js} supplies the arguments and {@link ShellSelectExecutor.runProbe}
+ * spawns them through the same `ctx.sandbox.confine` an ordinary command goes
+ * through, so a configurable executable path cannot become an unrestricted
+ * execution channel merely because the arguments are fixed. A row whose mode
+ * cannot confine it is reported as not probed rather than started unconfined.
+ *
+ * Three facts are kept apart on purpose, because collapsing them is how a
+ * settings card ends up claiming safety it has not observed:
+ *
+ * - `available` — the executable resolves at all;
+ * - `confineable` — what the catalog expects the sandbox to be able to do with
+ *   it on this platform, which is a claim, not a measurement;
+ * - `confinement.observed` — what this machine actually did when the plugin
+ *   asked the sandbox to run it.
  *
  * @module dsh-shell-select/status
  */
 
+import { catalogFor, probeFor } from './catalog.js'
 import { versionArgv, testCommand } from './dialects.js'
 import { VERIFIED_CONFINEMENT_PLATFORMS } from './catalog.js'
+import { ShellSelectionRefusedError } from './executor.js'
 
 /** Route prefix both endpoints live under. */
 export const STATUS_ROUTE_PREFIX = '/dsh-shell-select'
 
 /** Deadline for one read-only version probe. */
 const PROBE_TIMEOUT_MS = 10_000
-
-/** Grace period handed to the subprocess provider for probe termination. */
-const PROBE_GRACE_MS = 2_000
 
 /**
  * Whether a request arrived over the loopback interface.
@@ -54,42 +63,76 @@ function sendJson(res, statusCode, payload) {
 }
 
 /**
- * Run one shell's fixed version query.
- * @param ctx - context carrying the subprocess service.
- * @param dialect - the entry's argument dialect.
- * @param executable - the resolved executable path.
- * @returns the first non-empty output line, or a diagnostic when the probe failed.
+ * The first non-empty line of a probe's combined output.
+ * @param probe - a settled probe.
+ * @returns the line, or undefined when the probe printed nothing.
  */
-async function probeVersion(ctx, dialect, executable) {
-  const controller = new AbortController()
-  const timer = setTimeout(() => { controller.abort(new Error('probe timed out')) }, PROBE_TIMEOUT_MS)
-  try {
-    const handle = ctx.subprocess.spawn({
-      argv: versionArgv(dialect, executable),
-      cwd: process.cwd(),
-      stdio: {
-        stdin: 'ignore',
-        stdout: { maxBytes: 8_192 },
-        stderr: { maxBytes: 8_192 },
-      },
-      graceMs: PROBE_GRACE_MS,
-      signal: controller.signal,
-    })
-    const outcome = await handle.done
-    const stdout = handle.collected.stdout?.readFrom(0).text ?? ''
-    const stderr = handle.collected.stderr?.readFrom(0).text ?? ''
-    const lines = `${stdout}\n${stderr}`.replace(/\0/gu, '').split('\n')
-      .map(line => line.trim())
-      .filter(line => line.length > 0)
-    if (outcome.exitCode !== 0 && lines.length === 0) {
-      return { ok: false, detail: `exited with code ${String(outcome.exitCode)}` }
+function firstLine(probe) {
+  return `${probe.stdout ?? ''}\n${probe.stderr ?? ''}`
+    .split('\n')
+    .map(line => line.trim())
+    .find(line => line.length > 0)
+}
+
+/**
+ * Turn one probe outcome into a row's reported facts.
+ *
+ * A non-zero exit is a failure even when the probe printed something: `dash`
+ * answers `--version` with "Illegal option" on stderr and exit 2, and reporting
+ * that as a version would describe the plugin's mistake as the shell's version.
+ * @param probe - the outcome from {@link ShellSelectExecutor.runProbe}.
+ * @param kind - `'version'` or `'interpreter'`, the answer the entry asked for.
+ * @returns the reported fields: one of `version`, `interpreter`, or `versionError`,
+ *   plus what the machine was observed to do.
+ */
+function probeFacts(probe, kind) {
+  if (probe.started !== true) {
+    return {
+      versionError: probe.detail ?? 'the probe did not run',
+      observed: probe.refused === true ? 'refused' : 'not-run',
     }
-    return lines.length > 0 ? { ok: true, version: lines[0] } : { ok: false, detail: 'no output' }
-  } catch (error) {
-    return { ok: false, detail: error instanceof Error ? error.message : String(error) }
-  } finally {
-    clearTimeout(timer)
   }
+  if (probe.runnerFailed === true) {
+    return {
+      versionError: `the sandbox runner could not start this shell: ${probe.detail}`,
+      observed: 'runner-failed',
+    }
+  }
+  // A confined run reports its enforcement; an unconfined one reports nothing.
+  const observed = probe.denied === undefined && probe.enforcement === undefined ? 'ran-unconfined' : 'confirmed'
+  if (probe.timedOut === true) {
+    return { versionError: `the probe timed out after ${PROBE_TIMEOUT_MS} ms`, observed }
+  }
+  const line = firstLine(probe)
+  if (probe.exitCode !== 0) {
+    return {
+      versionError: `exited with code ${String(probe.exitCode)}${line === undefined ? '' : `: ${line}`}`,
+      observed,
+    }
+  }
+  if (line === undefined) return { versionError: 'no output', observed }
+  return { [kind === 'interpreter' ? 'interpreter' : 'version']: line, observed }
+}
+
+/**
+ * Probe one resolvable row under the session's confinement.
+ * @param executor - the mounted shell-select executor.
+ * @param entry - the catalog entry behind the row, which owns the probe query.
+ * @param row - the catalog row to probe.
+ * @param policy - the resolved sandbox policy.
+ * @param signal - cancellation for all probes.
+ * @returns the row's probe facts.
+ */
+async function probeRow(executor, entry, row, policy, signal) {
+  if (!row.confineable && policy.mode !== 'danger-full-access') {
+    return {
+      versionError: `not probed: ${row.label} cannot be confined under "${policy.mode}", `
+        + 'and this plugin never runs a probe unconfined',
+      observed: 'not-probed',
+    }
+  }
+  const probe = probeFor(entry, row.path, versionArgv)
+  return probeFacts(await executor.runProbe(probe.argv, signal), probe.kind)
 }
 
 /**
@@ -102,59 +145,78 @@ export async function buildStatus(ctx, executor) {
   const platform = await executor.executionPlatformNow()
   const policy = ctx.sandboxPolicy.resolve()
   const rows = await executor.describeCatalog()
+  const entries = new Map(catalogFor(platform).map(entry => [entry.id, entry]))
+  const platformVerified = VERIFIED_CONFINEMENT_PLATFORMS.includes(platform)
   // Probes run in parallel: each is an independent short-lived process, and the
   // card is opened on demand rather than in any hot path.
   const probed = await Promise.all(rows.map(async row => {
-    // Two distinct facts the card must not conflate: whether the binary runs at
-    // all, and whether it may run under the mode this session resolved. Both
-    // are reported for every row, so an absent shell is still answered rather
-    // than left undefined for the card to guess at.
+    // Facts the card must not conflate: whether the binary runs at all, whether
+    // the catalog expects the sandbox to be able to confine it, and whether this
+    // machine was observed doing so. `usableInMode` answers only the second
+    // combined with availability, so it stays a statement of expectation.
     const usableInMode = row.available === true
       && (row.confineable || policy.mode === 'danger-full-access')
-    if (row.available !== true) return { ...row, usableInMode }
-    const version = await probeVersion(ctx, row.dialect, row.path)
-    return {
-      ...row,
-      ...version.ok ? { version: version.version } : { versionError: version.detail },
-      usableInMode,
+    const confinement = {
+      // The catalog's claim for this platform, and whether that claim was
+      // measured here rather than reasoned about.
+      expected: row.confineable ? 'confined' : 'unconfined',
+      verified: platformVerified,
+      ...row.confineReason === undefined ? {} : { reason: row.confineReason },
     }
+    if (row.available !== true) {
+      return { ...row, usableInMode, confinement: { ...confinement, observed: 'not-probed' } }
+    }
+    const probe = await probeRow(executor, entries.get(row.id), row, policy, probeSignal())
+    return { ...row, ...probe, usableInMode, confinement: { ...confinement, observed: probe.observed } }
   }))
   return {
     active: {
       shell: executor.selectSettings.shell,
-      selected: executor.describeShell().id,
+      // From the rows' own resolution, not the cached description: the card and
+      // a call resolve the selection the same way.
+      selected: rows.find(row => row.selected === true)?.id,
       platform,
       mode: policy.mode,
       workspaceRoot: policy.workspaceRoot,
     },
-    confinementVerified: VERIFIED_CONFINEMENT_PLATFORMS.includes(platform),
+    // A platform-level statement: whether *any* confinement claim here was
+    // measured by this plugin. Per-shell observation rides on each row.
+    confinementVerified: platformVerified,
     shells: probed,
   }
+}
+
+/** A deadline for one probe, which never outlives the status read. */
+function probeSignal() {
+  return AbortSignal.timeout(PROBE_TIMEOUT_MS)
 }
 
 /**
  * Run the card's "Test shell" action.
  *
  * The command is a module constant, so this action carries no input. It runs
- * through the executor's normal resolve/run path, which means it reports the
- * same refusal a model call would get when the shell cannot be confined — the
- * test never demonstrates a capability the tool itself would not grant.
+ * through the executor's normal decide/run path, which means it reports the same
+ * refusal a model call would get when the shell cannot be confined — the test
+ * never demonstrates a capability the tool itself would not grant.
  * @param ctx - context carrying the shell executor.
  * @param executor - the mounted shell-select executor.
  * @returns the test outcome, including the resolved mode and sandbox facts.
  */
 export async function runShellTest(ctx, executor) {
-  const describe = executor.describeShell()
-  if (!describe.available) return { ok: false, stage: 'executable', detail: describe.detail }
   try {
-    const spec = ctx.shell.resolve({ command: testCommand(), signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) })
-    const result = await ctx.shell.run(spec)
+    const decided = await executor.decide(executor.resolve({
+      command: testCommand(),
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    }))
+    const result = await executor.run(decided.spec)
     return {
       ok: result.exitCode === 0 && !result.timedOut,
       stage: 'ran',
-      shell: describe.id,
-      executable: describe.executable,
-      mode: spec.sandboxPolicy.mode,
+      // From the decision that produced the process, not from a separate read
+      // of the selection.
+      shell: decided.decision.shell.id,
+      executable: decided.decision.shell.executable,
+      mode: decided.spec.sandboxPolicy.mode,
       exitCode: result.exitCode,
       stdout: result.stdout.text.trim(),
       stderr: result.stderr.text.trim(),
@@ -170,8 +232,11 @@ export async function runShellTest(ctx, executor) {
   } catch (error) {
     return {
       ok: false,
-      stage: 'refused',
-      shell: describe.id,
+      // Two different failures with two different remedies: the selection could
+      // not be resolved to a runnable shell at all, or it resolved and the
+      // sandbox refused to run it.
+      stage: error instanceof ShellSelectionRefusedError ? 'refused' : 'selection',
+      shell: executor.describeShell().id,
       detail: error instanceof Error ? error.message : String(error),
     }
   }

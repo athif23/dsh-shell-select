@@ -68,7 +68,7 @@ async function tryResolve(ctx, candidate, env, signal) {
  * @throws {Error} when the configured path is unusable or nothing is discovered.
  */
 export async function resolveShell(ctx, options) {
-  const { entry, configuredPath, env, signal } = options
+  const { entry, configuredPath, env, signal, platform } = options
   const configured = typeof configuredPath === 'string' && configuredPath.trim().length > 0
     ? configuredPath.trim()
     : undefined
@@ -81,9 +81,12 @@ export async function resolveShell(ctx, options) {
         + `in the execution environment: ${configured}`,
       )
     }
-    const identity = checkIdentity(entry, resolved)
+    const identity = checkIdentity(entry, resolved, platform)
     if (!identity.ok) {
-      throw new Error(`dsh-shell-select: the configured executable for ${entry.label} is not that shell — ${identity.detail}`)
+      throw new Error(
+        `dsh-shell-select: the configured executable for ${entry.label} is not that shell — ${identity.detail}. `
+        + 'Clear the "executable" override, or select the shell that path belongs to.',
+      )
     }
     return { path: resolved, source: 'configured' }
   }
@@ -95,7 +98,7 @@ export async function resolveShell(ctx, options) {
       probed.push(candidate)
       continue
     }
-    const identity = checkIdentity(entry, resolved)
+    const identity = checkIdentity(entry, resolved, platform)
     probed.push(candidate)
     if (identity.ok) return { path: resolved, source: 'discovered' }
   }
@@ -162,9 +165,14 @@ export function requireWorkingDirectory(workdir, platform) {
 
 /**
  * One status row per catalog entry on a platform.
+ *
+ * Each row resolves through the *same* override rule execution uses, so what the
+ * card reports as the effective executable is what a command would run. An
+ * override that names one shell is applied to that shell's row only, because
+ * applying it to every row would report the same file as five different shells.
  * @param ctx - context carrying `subprocess`.
  * @param platform - `'windows'` or `'posix'`.
- * @param options - the selected entry id, configured path, and environment.
+ * @param options - the selected entry id, the override rule, and the environment.
  * @returns the rows, in catalog order.
  */
 export async function inspectCatalog(ctx, platform, options) {
@@ -173,11 +181,9 @@ export async function inspectCatalog(ctx, platform, options) {
     const selected = entry.id === options.selectedId
     const inspection = await inspectShell(ctx, {
       entry,
-      // Only the selected entry inherits the configured path: an override names
-      // one shell, and applying it to every entry would report the same file as
-      // five different shells.
-      configuredPath: selected ? options.configuredPath : undefined,
+      configuredPath: options.overrideFor(entry, selected),
       env: options.env,
+      platform,
     })
     rows.push({
       id: entry.id,

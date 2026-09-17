@@ -17,6 +17,7 @@ import {
   catalogFor,
   checkConfinement,
   checkIdentity,
+  entryClaiming,
   findEntry,
 } from '../src/catalog.js'
 import {
@@ -115,8 +116,8 @@ describe('the catalog names shells, not paths', () => {
     for (const candidate of gitbash.candidates(WINDOWS_ENV)) {
       assert.ok(!candidate.toLowerCase().endsWith('git-bash.exe'), candidate)
     }
-    assert.equal(checkIdentity(gitbash, 'D:\\Git\\bin\\bash.exe').ok, true)
-    const refused = checkIdentity(gitbash, 'D:\\Git\\git-bash.exe')
+    assert.equal(checkIdentity(gitbash, 'D:\\Git\\bin\\bash.exe', 'windows').ok, true)
+    const refused = checkIdentity(gitbash, 'D:\\Git\\git-bash.exe', 'windows')
     assert.equal(refused.ok, false)
     assert.match(refused.detail, /expected bash\.exe/u)
   })
@@ -128,9 +129,49 @@ describe('the catalog names shells, not paths', () => {
       assert.ok(!lower.includes('windowsapps'), candidate)
     }
   })
+})
 
-  it('leaves entries without an identity guard unguarded', () => {
-    assert.deepEqual(checkIdentity(findEntry('posix', 'bash'), '/usr/bin/bash'), { ok: true })
+describe('the identity guard pairs a program with its own launch arguments', () => {
+  it('accepts the entry\'s own program name', () => {
+    assert.deepEqual(checkIdentity(findEntry('posix', 'bash'), '/usr/bin/bash', 'posix'), { ok: true })
+    assert.deepEqual(checkIdentity(findEntry('windows', 'cmd'), 'C:\\Windows\\system32\\cmd.exe', 'windows'), { ok: true })
+  })
+
+  it('accepts a program name no entry claims', () => {
+    // An override naming a shell this catalog does not know is the user saying
+    // which shell their binary is; refusing it would break relocated or renamed
+    // installs without preventing any wrong pairing.
+    assert.deepEqual(checkIdentity(findEntry('posix', 'bash'), '/opt/tools/mysh', 'posix'), { ok: true })
+    assert.deepEqual(checkIdentity(findEntry('windows', 'cmd'), 'C:\\tools\\renamed-cmd.exe', 'windows'), { ok: true })
+    // Git Bash is the one entry stricter than that rule: it must be the real
+    // bash.exe, because the sibling git-bash.exe launches a GUI window instead
+    // of running the command.
+    const launcher = checkIdentity(findEntry('windows', 'gitbash'), 'D:\\Git\\git-bash.exe', 'windows')
+    assert.equal(launcher.ok, false)
+    assert.match(launcher.detail, /expected bash\.exe/u)
+  })
+
+  it('refuses a program that another catalog entry names, and says which', () => {
+    for (const [entryId, path, platform, expected] of [
+      ['bash', '/usr/bin/dash', 'posix', /that is POSIX sh/u],
+      ['gitbash', 'C:\\Windows\\system32\\cmd.exe', 'windows', /that is Command Prompt \(cmd\.exe\)/u],
+      ['pwsh', 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', 'windows', /that is Windows PowerShell 5\.1/u],
+      ['cmd', 'C:\\Program Files\\PowerShell\\7\\pwsh.exe', 'windows', /that is PowerShell/u],
+      ['gitbash', 'C:\\Windows\\System32\\wsl.exe', 'windows', /that is WSL Bash/u],
+    ]) {
+      const verdict = checkIdentity(findEntry(platform, entryId), path, platform)
+      assert.equal(verdict.ok, false, `${entryId} must refuse ${path}`)
+      assert.match(verdict.detail, expected, `${entryId} must name the shell the path belongs to`)
+    }
+  })
+
+  it('claims a program name only when exactly one entry names it', () => {
+    assert.equal(entryClaiming('posix', 'bash').id, 'bash')
+    assert.equal(entryClaiming('posix', 'dash').id, 'sh')
+    assert.equal(entryClaiming('windows', 'powershell.exe').id, 'powershell')
+    assert.equal(entryClaiming('posix', 'mysh'), undefined)
+    // Case-insensitively, because Windows and macOS filesystems are.
+    assert.equal(entryClaiming('windows', 'CMD.EXE').id, 'cmd')
   })
 })
 
