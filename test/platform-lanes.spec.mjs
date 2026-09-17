@@ -1,18 +1,22 @@
 /**
  * The verification boundary, stated as a test rather than only as prose.
  *
- * The catalog, the dialect builders, the resolution walk, and the gate are pure
- * functions of `(platform, environment)`, so the POSIX lane is verified as logic
- * on any host. What cannot be verified here is POSIX *execution*: no Linux or
- * macOS host runs this suite, so nothing in this repository has spawned a POSIX
- * shell through this plugin. That gap is asserted explicitly so it cannot be
- * forgotten or quietly overclaimed.
+ * The catalog, the dialect builders, the resolution walk, and the decision are
+ * pure functions of `(platform, environment)`, so both platforms' logic is
+ * verified on any host. What differs is *execution*: `integration.spec.mjs`
+ * writes both lanes and each one runs on its own platform, so this file asserts
+ * that the lanes still name real catalog entries and that a required shell
+ * cannot quietly become optional.
+ *
+ * It deliberately makes no claim about which lanes have run. That is what the
+ * integration results say, and the README repeats them.
  */
 
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { PLATFORMS, VERIFIED_CONFINEMENT_PLATFORMS, catalogFor, checkConfinement } from '../src/catalog.js'
 import { buildInvocation } from '../src/dialects.js'
+import { LANES, laneFor, unknownLaneShells } from './lanes.mjs'
 
 const HOST_PLATFORM = process.platform === 'win32' ? 'windows' : 'posix'
 
@@ -51,6 +55,37 @@ describe('what is verified on every host', () => {
   })
 })
 
+describe('the execution lanes name real shells', () => {
+  for (const platform of PLATFORMS) {
+    it(`${platform} declares a lane this catalog can satisfy`, () => {
+      const lane = laneFor(platform)
+      // A rename that emptied a lane would make its cases skip, or worse, pass
+      // vacuously; this is the assertion that stops that.
+      assert.deepEqual(unknownLaneShells(platform), [], `${platform} lane names a shell the catalog does not have`)
+      assert.ok(lane.required.length > 0, `${platform} needs a required baseline`)
+      assert.ok(lane.required.includes(lane.driver) || lane.required.includes(lane.command),
+        `${platform} must derive its shared cases from a required shell`)
+    })
+
+    it(`${platform} keeps every required shell out of the optional set`, () => {
+      const lane = laneFor(platform)
+      for (const id of lane.required) assert.ok(!lane.optional.includes(id), `${platform}/${id}`)
+    })
+  }
+
+  it('takes the host lane from the host platform', () => {
+    assert.equal(laneFor(HOST_PLATFORM).required.length > 0, true)
+    assert.equal(Object.keys(LANES).includes(HOST_PLATFORM), true)
+  })
+
+  it('requires the shell each platform ships with', () => {
+    // The baseline a lane may not skip: Windows always has cmd.exe and Windows
+    // PowerShell 5.1; a POSIX host always has bash.
+    assert.deepEqual([...LANES.windows.required].sort(), ['cmd', 'powershell'])
+    assert.deepEqual([...LANES.posix.required], ['bash'])
+  })
+})
+
 describe('what remains unverified', () => {
   it('names the platform whose confinement facts were measured', () => {
     // Windows is measured; the POSIX rows are the harness's documented behavior
@@ -58,10 +93,13 @@ describe('what remains unverified', () => {
     assert.deepEqual([...VERIFIED_CONFINEMENT_PLATFORMS], ['windows'])
   })
 
-  it('has never spawned a POSIX shell from this suite', { skip: HOST_PLATFORM === 'posix' ? false : 'this host has no POSIX shell to spawn' }, () => {
-    // On a POSIX host the integration suite runs the posix lane for real; the
-    // test exists so that the skip is visible on a Windows host instead of the
-    // lane silently not being covered.
-    assert.equal(HOST_PLATFORM, 'posix')
+  it('reports the POSIX backend as unmeasured rather than as measured-safe', () => {
+    // The catalog marks POSIX entries confineable because the harness's POSIX
+    // backends wrap argv and are indifferent to the shell inside. That is a
+    // claim about the harness, and the status payload says so.
+    for (const entry of catalogFor('posix')) {
+      assert.equal(checkConfinement(entry, 'workspace-write').ok, true, entry.id)
+    }
+    assert.ok(!VERIFIED_CONFINEMENT_PLATFORMS.includes('posix'))
   })
 })
