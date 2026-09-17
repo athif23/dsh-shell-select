@@ -213,17 +213,17 @@ already resolved, and never alters a running process.
 A collapsed row in **Settings → Plugins**, like every other plugin card: a name
 over a one-line description, a chevron, and an `Unsaved` marker while the row
 holds edits. It reads native because it reuses the shipped card's rules — the
-same `--dsw-alias-*` tokens, the same geometry, the same `.16s` transitions —
-in a stylesheet the bundle injects, since hover, focus rings, and reduced motion
-have no inline equivalent.
+same `--dsw-alias-*` tokens, the same geometry, the same `.16s` transitions, the
+same `Menu` dropdown the other settings rows use — carried in a stylesheet the
+bundle injects, since hover, focus rings, and reduced motion have no inline
+equivalent.
 
 Opening it shows:
 
-- every shell in the platform's catalog as a **choice**, each carrying its own
-  reported version, so an uninstalled one reads as *not found* rather than
-  disappearing from the list;
-- an **Automatic** choice, which is what the setting defaults to, labelled with
-  the shell it currently resolves to;
+- a **dropdown** listing every shell in the platform's catalog, each option
+  carrying its own reported version, so an uninstalled shell reads as *not
+  found* rather than disappearing from the list. **Automatic**, the default, is
+  the first option and says which shell it currently resolves to;
 - the selected shell's facts as **separate statements rather than one status
   word** — detected path, version, whether it can be confined, the permission
   mode in force, and whether it is usable under that mode — plus the measured
@@ -237,7 +237,7 @@ and **Discard** drops the lot. A save goes out as **one revision-fenced
 mutation**, so it lands whole or not at all, and the card collapses only after it
 does — a rejected write keeps its diagnostics and your edits in place.
 
-Because the facts follow the *staged* choice, you can see what a shell would
+Because the facts follow the *staged* selection, you can see what a shell would
 resolve to before committing to it. What the numbers cannot yet reflect is the
 staged path itself, so **Test shell** says so while edits are outstanding: it
 runs the *saved* selection. The test runs `echo DSH-SHELL-SELECT-TEST-OK`, a

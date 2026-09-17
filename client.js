@@ -32,7 +32,7 @@ window.__ModuleLoader__.load({
     var exports = module.exports
 
     const React = require('react')
-    const { Tag, IconChevronDownOutline14 } = require('@deepseek-ai/dsh-client-ui-primitives')
+    const { Tag, IconChevronDownOutline14, Menu } = require('@deepseek-ai/dsh-client-ui-primitives')
 
     const h = React.createElement
 
@@ -218,25 +218,33 @@ window.__ModuleLoader__.load({
 .dsss-hint { margin: 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-tertiary); }
 .dsss-invalid { margin: 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-error); }
 
-.dsss-choices { display: flex; flex-wrap: wrap; gap: 8px; }
-.dsss-choice {
-  appearance: none; font: inherit; cursor: pointer;
-  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
-  padding: 6px 12px;
-  border: 0.5px solid var(--dsw-alias-border-l4);
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-layer-3);
+/* Selector row: the label and its description on the left, the trigger on the
+   right. The shipped Enter-behavior row's layout and trigger, so a dropdown in
+   this card is the same control as a dropdown anywhere else in Settings. */
+.dsss-row { display: flex; align-items: center; gap: 8px; }
+.dsss-rowText { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; padding-right: 24px; }
+.dsss-rowTitle { font-size: 13px; font-weight: 500; line-height: 1.5; color: var(--dsw-alias-label-primary); }
+.dsss-rowDesc { font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-tertiary); }
+.dsss-selector {
+  display: inline-flex; align-items: center; gap: 12px;
+  max-width: 240px;
+  height: 36px; padding: 0 14px;
+  border: none; border-radius: 18px;
+  background: var(--dsw-alias-bg-module-platform);
+  font: inherit; font-size: 14px; line-height: 22px;
   color: var(--dsw-alias-label-primary);
-  font-size: 13px; line-height: 1.5;
-  transition: transform .16s cubic-bezier(.23, 1, .32, 1), border-color .16s, background .16s, color .16s;
+  cursor: pointer;
+  transition: transform .16s cubic-bezier(.23, 1, .32, 1), background .16s;
 }
-.dsss-choice:hover:not(:disabled) { border-color: var(--dsw-alias-label-dimmed); }
-.dsss-choice:active:not(:disabled) { transform: scale(.97); }
-.dsss-choice:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
-.dsss-choice:disabled { opacity: .4; cursor: default; }
-.dsss-choiceOn { background: var(--dsw-alias-label-primary); color: var(--dsw-alias-bg-layer-3); border-color: transparent; }
-.dsss-choiceOn:hover:not(:disabled) { border-color: transparent; }
-.dsss-choiceMeta { font-size: 11px; line-height: 1.4; opacity: .72; }
+.dsss-selector > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsss-selector:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+.dsss-selector:active:not(:disabled) { transform: scale(.97); }
+.dsss-selector:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
+.dsss-selector:disabled { opacity: .4; cursor: default; }
+.dsss-chevron { flex: none; }
+/* An option's own fact, quieter than its name: the version it reports, or that
+   it is not installed. Truncates with the label, never wraps. */
+.dsss-optMeta { color: var(--dsw-alias-label-tertiary); }
 
 .dsss-facts { display: flex; flex-direction: column; gap: 2px; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-secondary); }
 .dsss-factsQuiet { color: var(--dsw-alias-label-tertiary); }
@@ -269,7 +277,7 @@ window.__ModuleLoader__.load({
 
 /* Press feedback is feedback, not motion: keep the scale, drop the animation. */
 @media (prefers-reduced-motion: reduce) {
-  .dsss-choice, .dsss-discard, .dsss-save, .dsss-tool, .dsss-chevron { transition-duration: 0ms; }
+  .dsss-selector, .dsss-discard, .dsss-save, .dsss-tool { transition-duration: 0ms; }
 }
 `
 
@@ -527,6 +535,7 @@ window.__ModuleLoader__.load({
       const { t } = props
       const state = props.useShellSelect(snapshot => snapshot)
       const [open, setOpen] = React.useState(false)
+      const [menuOpen, setMenuOpen] = React.useState(false)
       const saveStarted = React.useRef(false)
       const { draft, stored, status, failures, writable, dirty, saving, failed } = state
 
@@ -554,30 +563,31 @@ window.__ModuleLoader__.load({
       const platform = status?.active?.platform
       const interactive = writable && !saving
 
-      /** One selectable shell, rendered as a capsule carrying its own facts. */
-      const choice = (id, label, meta) => {
-        const on = id === draft.shell
-        return h('button', {
-          key: id,
-          type: 'button',
-          className: on ? 'dsss-choice dsss-choiceOn' : 'dsss-choice',
-          'aria-pressed': on,
-          disabled: !interactive,
-          onClick: () => { props.edit('shell', id) },
-        },
-        h('span', null, label),
-        h('span', { className: 'dsss-choiceMeta' }, meta),
-        )
-      }
+      /** One option's label: the shell's name, then its own fact more quietly. */
+      const optionLabel = (name, meta) => meta === undefined || meta.length === 0
+        ? name
+        : h('span', null, name, h('span', { className: 'dsss-optMeta' }, ` · ${meta}`))
 
-      const choices = [
-        choice(AUTO, t('auto'), `${t('autoResolves')} ${rowFor(status, resolvedId)?.label ?? '…'}`),
-        ...(status?.shells ?? []).map(row => choice(
-          row.id,
-          row.label,
-          row.available === true ? (row.version ?? row.path ?? '') : t('notFound'),
-        )),
+      // Every catalog row carries its own resolution, so an uninstalled shell is
+      // still offered — it reads as not found, and it is a legitimate choice
+      // when an explicit path is about to be given for it.
+      const shellOptions = [
+        {
+          id: AUTO,
+          label: optionLabel(t('auto'), t('autoResolves') + ' ' + (rowFor(status, resolvedId)?.label ?? '…')),
+        },
+        ...(status?.shells ?? []).map(row => ({
+          id: row.id,
+          label: optionLabel(row.label, row.available === true
+            ? (row.version ?? row.path ?? '')
+            : t('notFound')),
+        })),
       ]
+
+      /** What the trigger reads: the selected shell's name, nothing more. */
+      const triggerLabel = draft.shell === AUTO
+        ? t('auto')
+        : (rowFor(status, draft.shell)?.label ?? draft.shell)
 
       // The facts follow the DRAFT selection, because every catalog row carries
       // its own resolution: picking a shell shows what it would resolve to
@@ -668,17 +678,45 @@ window.__ModuleLoader__.load({
             !writable ? h('p', { className: 'dsss-readOnly', role: 'status' }, t('readOnly')) : null,
 
             h('div', { className: 'dsss-field' },
-              h('div', { className: 'dsss-head' },
-                h('span', { className: 'dsss-label dsss-grow' }, t('shell')),
-                // Compared as setting VALUES: `auto` and a shell that auto
-                // happens to resolve to are different settings, even though they
-                // name the same catalog row.
-                stored.shell === draft.shell
-                  ? null
-                  : h(Tag, { tone: 'quiet' }, `${t('currentShell')}: ${savedRow?.label ?? stored.shell}`),
-                h(Tag, { tone: 'quiet' }, `${t('platform')}: ${platform ?? '…'}`),
+              h('div', { className: 'dsss-row' },
+                h('div', { className: 'dsss-rowText' },
+                  h('div', { className: 'dsss-rowTitle' }, t('shell')),
+                  h('div', { className: 'dsss-rowDesc' }, [
+                    `${t('platform')}: ${platform ?? '…'}`,
+                    // Compared as setting VALUES: `auto` and a shell that auto
+                    // happens to resolve to are different settings, even though
+                    // they name the same catalog row.
+                    stored.shell === draft.shell
+                      ? ''
+                      : ` · ${t('currentShell')}: ${savedRow?.label ?? stored.shell}`,
+                  ].join('')),
+                ),
+                h(Menu, {
+                  open: menuOpen,
+                  onClose: () => { setMenuOpen(false) },
+                  items: shellOptions,
+                  selectedId: draft.shell,
+                  onSelect: (id) => {
+                    setMenuOpen(false)
+                    props.edit('shell', id)
+                  },
+                  align: 'end',
+                  // Portalled: the settings panel scrolls, and an in-place list
+                  // would be cropped by it.
+                  portal: true,
+                  anchor: h('button', {
+                    type: 'button',
+                    className: 'dsss-selector',
+                    'aria-haspopup': 'menu',
+                    'aria-expanded': menuOpen,
+                    disabled: !interactive,
+                    onClick: () => { setMenuOpen(!menuOpen) },
+                  },
+                  h('span', null, triggerLabel),
+                  h(IconChevronDownOutline14, { className: 'dsss-chevron' }),
+                  ),
+                }),
               ),
-              h('div', { className: 'dsss-choices' }, choices),
               h('div', { className: 'dsss-facts' }, facts),
               status?.confinementVerified === false
                 ? h('p', { className: 'dsss-hint' }, t('confinementUnverified'))

@@ -99,7 +99,7 @@ function fakePrimitives() {
     Object.defineProperty(component, 'name', { value: name })
     return component
   }
-  return { Tag: stub('Tag'), IconChevronDownOutline14: stub('IconChevronDownOutline14') }
+  return { Tag: stub('Tag'), IconChevronDownOutline14: stub('IconChevronDownOutline14'), Menu: stub('Menu') }
 }
 
 /** Collect every rendered node, elements and text alike, depth first. */
@@ -281,18 +281,33 @@ async function mountCard(options = {}) {
     /** Click the header to expand or collapse. */
     toggle: () => { elements(mounted.tree, 'button')[0].props.onClick() },
     buttons: className => classButtons(mounted.tree, className),
-    choices: () => classButtons(mounted.tree, 'dsss-choice'),
-    /** Click the choice button whose label starts with `label`. */
-    choose: label => {
-      const button = classButtons(mounted.tree, 'dsss-choice').find(entry => texts(entry)[0] === label)
-      assert.ok(button, `no choice button labelled ${label}`)
-      button.props.onClick()
+    /** The dropdown the card renders, once it is expanded. */
+    menu: () => elements(mounted.tree, 'Menu')[0],
+    /** The trigger button the dropdown is anchored to. */
+    trigger: () => elements(mounted.tree, 'Menu')[0]?.props.anchor,
+    /** Every option id the dropdown offers, in order. */
+    options: () => (elements(mounted.tree, 'Menu')[0]?.props.items ?? []).map(item => item.id),
+    /** An option's rendered text, flattened. */
+    optionText: id => {
+      const item = elements(mounted.tree, 'Menu')[0]?.props.items.find(entry => entry.id === id)
+      return item === undefined ? undefined : texts(all(item.label)).join('')
     },
-    snapshot: () => injected.hooks.shellSelect.getSnapshot(),
-    pressing: () => texts(classButtons(mounted.tree, 'dsss-choice').find(entry => entry.props['aria-pressed'] === true))[0],
+    /** The option the dropdown reports as selected. */
+    selectedOption: () => elements(mounted.tree, 'Menu')[0]?.props.selectedId,
+    /** What the trigger reads. */
+    triggerText: () => texts(all(elements(mounted.tree, 'Menu')[0]?.props.anchor)).join(''),
+    /** Choose an option the way the dropdown reports a click. */
+    select: id => {
+      const menu = elements(mounted.tree, 'Menu')[0]
+      assert.ok(menu, 'the dropdown is not rendered')
+      menu.props.onSelect(id)
+    },
+    /** Whether the dropdown is on screen at all. */
+    hasMenu: () => elements(mounted.tree, 'Menu').length > 0,
     save: () => { classButtons(mounted.tree, 'dsss-save')[0].props.onClick() },
     saveDisabled: () => classButtons(mounted.tree, 'dsss-save')[0].props.disabled,
     discard: () => { classButtons(mounted.tree, 'dsss-discard')[0].props.onClick() },
+    snapshot: () => injected.hooks.shellSelect.getSnapshot(),
     text: () => texts(mounted.tree).join(' | '),
     settle: () => new Promise(resolve => setImmediate(resolve)),
   }
@@ -364,7 +379,7 @@ describe('collapsible card', () => {
     const card = await mountCard()
     assert.ok(card.text().includes('Shell'), 'the header names the card')
     assert.ok(card.text().includes('Choose the shell every command runs in.'), 'the header describes it')
-    assert.equal(card.choices().length, 0, 'choices are not rendered while collapsed')
+    assert.equal(card.hasMenu(), false, 'the dropdown is not rendered while collapsed')
     assert.equal(elements(card.tree, 'input').length, 0, 'fields are not rendered while collapsed')
     assert.equal(card.buttons('dsss-save').length, 0, 'the footer is not rendered while collapsed')
   })
@@ -382,17 +397,34 @@ describe('collapsible card', () => {
   it('shows the shell choices and the footer once expanded', async () => {
     const card = await mountCard()
     card.toggle()
-    assert.deepEqual(card.choices().map(button => texts(button)[0]),
-      ['Automatic', 'PowerShell', 'Command Prompt (cmd.exe)', 'Git Bash', 'WSL Bash'])
+    assert.deepEqual(card.options(),
+      ['auto', 'pwsh', 'cmd', 'gitbash', 'wsl'])
     assert.equal(card.buttons('dsss-save').length, 1)
     assert.equal(card.buttons('dsss-discard').length, 1)
     assert.equal(card.buttons('dsss-tool').length, 2, 'test and refresh')
   })
 
-  it('marks the saved choice pressed', async () => {
+  it('opens as a dropdown anchored to its trigger', async () => {
     const card = await mountCard()
     card.toggle()
-    assert.equal(card.pressing(), 'Automatic')
+    assert.equal(card.trigger().props['aria-haspopup'], 'menu', 'the trigger announces a menu')
+    assert.equal(card.trigger().props['aria-expanded'], false)
+    assert.equal(card.menu().props.open, false, 'the list starts closed')
+    card.trigger().props.onClick()
+    assert.equal(card.trigger().props['aria-expanded'], true)
+    assert.equal(card.menu().props.open, true)
+    // Choosing a row closes the list, which is the dropdown's own contract.
+    card.select('cmd')
+    assert.equal(card.menu().props.open, false)
+  })
+
+  it('shows the saved shell on the trigger and marks it in the list', async () => {
+    const card = await mountCard()
+    card.toggle()
+    assert.equal(card.selectedOption(), 'auto')
+    // The trigger reads the shell's name, and Automatic says what it resolves to.
+    assert.match(card.triggerText(), /Automatic/)
+    assert.match(texts(all(card.menu().props.items[0].label)).join(''), /resolves to Command Prompt/)
   })
 })
 
@@ -408,9 +440,9 @@ describe('staged form', () => {
   it('stages a shell choice without writing it', async () => {
     const card = await mountCard()
     card.toggle()
-    card.choose('Git Bash')
+    card.select('gitbash')
     assert.deepEqual(card.scope.calls, [], 'a staged edit must not reach the host')
-    assert.equal(card.pressing(), 'Git Bash')
+    assert.equal(card.selectedOption(), 'gitbash')
     assert.ok(card.text().includes('Unsaved'), 'the header reports unsaved edits')
     assert.equal(card.saveDisabled(), false)
   })
@@ -418,28 +450,28 @@ describe('staged form', () => {
   it('keeps staged edits across collapsing, and marks them while collapsed', async () => {
     const card = await mountCard()
     card.toggle()
-    card.choose('Git Bash')
+    card.select('gitbash')
     card.toggle()
-    assert.equal(card.choices().length, 0, 'collapsed again')
+    assert.equal(card.hasMenu(), false, 'collapsed again')
     assert.ok(card.text().includes('Unsaved'), 'a collapsed card still says it holds edits')
     card.toggle()
-    assert.equal(card.pressing(), 'Git Bash', 'the draft survived')
+    assert.equal(card.selectedOption(), 'gitbash', 'the draft survived')
   })
 
   it('drops every staged edit on Discard', async () => {
     const card = await mountCard()
     card.toggle()
-    card.choose('Git Bash')
+    card.select('gitbash')
     card.discard()
     assert.deepEqual(card.scope.calls, [])
-    assert.equal(card.pressing(), 'Automatic', 'the stored value is auto')
+    assert.equal(card.selectedOption(), 'auto', 'the stored value is auto')
     assert.ok(!card.text().includes('Unsaved'))
   })
 
   it('writes the staged edits as ONE revision-fenced mutation', async () => {
     const card = await mountCard()
     card.toggle()
-    card.choose('Git Bash')
+    card.select('gitbash')
     card.save()
     assert.equal(card.scope.calls.length, 1, 'a save is a single write, not one per field')
     assert.equal(card.scope.calls[0].revision, 7, 'the revision the card read fences the write')
@@ -459,7 +491,7 @@ describe('staged form', () => {
   it('carries a staged boolean, not its text form', async () => {
     const card = await mountCard()
     card.toggle()
-    card.choose('Git Bash')
+    card.select('gitbash')
     const checkbox = elements(card.tree, 'input').find(input => input.props.type === 'checkbox')
     checkbox.props.onChange({ target: { checked: true } })
     card.save()
@@ -472,10 +504,10 @@ describe('staged form', () => {
   it('collapses after a save lands whole', async () => {
     const card = await mountCard()
     card.toggle()
-    card.choose('Git Bash')
+    card.select('gitbash')
     card.save()
     await card.settle()
-    assert.equal(card.choices().length, 0, 'a completed save closes the card')
+    assert.equal(card.hasMenu(), false, 'a completed save closes the card')
     assert.ok(!card.text().includes('Unsaved'))
   })
 
@@ -483,12 +515,12 @@ describe('staged form', () => {
     const card = await mountCard()
     card.scope.mutate = async () => { throw new Error('rejected') }
     card.toggle()
-    card.choose('Git Bash')
+    card.select('gitbash')
     card.save()
     await card.settle()
     assert.ok(card.text().includes('did not accept these values'), 'the failure is reported')
     assert.ok(card.text().includes('Unsaved'), 'the staged edits are kept for correction')
-    assert.equal(card.pressing(), 'Git Bash')
+    assert.equal(card.selectedOption(), 'gitbash')
   })
 })
 
@@ -500,7 +532,7 @@ describe('the fields follow the staged selection', () => {
     card.toggle()
     assert.equal(elements(card.tree, 'input').filter(input => input.props.type === 'checkbox').length, 0,
       'cmd takes no login flag')
-    card.choose('Git Bash')
+    card.select('gitbash')
     assert.equal(elements(card.tree, 'input').filter(input => input.props.type === 'checkbox').length, 1)
   })
 
@@ -508,7 +540,7 @@ describe('the fields follow the staged selection', () => {
     const card = await mountCard()
     card.toggle()
     assert.deepEqual(inputIds(card), ['dsss-executable'], 'only the executable field for cmd')
-    card.choose('WSL Bash')
+    card.select('wsl')
     assert.deepEqual(inputIds(card),
       ['dsss-executable', 'dsss-loginShell', 'dsss-wslDistro', 'dsss-wslMountRoot'],
       'the WSL shell also takes a login flag')
@@ -518,7 +550,7 @@ describe('the fields follow the staged selection', () => {
     const card = await mountCard()
     card.toggle()
     assert.ok(card.text().includes('C:/cmd.exe'), 'the saved shell is cmd')
-    card.choose('Git Bash')
+    card.select('gitbash')
     assert.ok(card.text().includes('D:/Git/bin/bash.exe'), 'the facts follow the draft')
     assert.ok(card.text().includes('measured reason'), 'including why it cannot be confined')
     assert.ok(card.text().includes('blocked by the current permission mode'))
@@ -554,7 +586,7 @@ describe('staged validation', () => {
   it('blocks a mount root that is not an absolute Linux path', async () => {
     const card = await mountCard()
     card.toggle()
-    card.choose('WSL Bash')
+    card.select('wsl')
     card.props.edit('wslMountRoot', 'mnt')
     assert.equal(card.saveDisabled(), true)
     assert.ok(card.text().includes('must be an absolute Linux path'))
@@ -563,14 +595,14 @@ describe('staged validation', () => {
   it('blocks a staged login flag on a shell that has no such flag', async () => {
     const card = await mountCard()
     card.toggle()
-    card.choose('Git Bash')
+    card.select('gitbash')
     const checkbox = elements(card.tree, 'input').find(input => input.props.type === 'checkbox')
     checkbox.props.onChange({ target: { checked: true } })
     assert.equal(card.saveDisabled(), false, 'bash takes a login flag')
     // Switching to a dialect with no login flag leaves the staged one standing.
     // The control that would clear it is not rendered for cmd, so the card
     // blocks the write rather than sending one the host refuses.
-    card.choose('Command Prompt (cmd.exe)')
+    card.select('cmd')
     assert.equal(card.saveDisabled(), true)
     assert.deepEqual(card.scope.calls, [])
   })
