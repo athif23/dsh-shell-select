@@ -210,19 +210,45 @@ already resolved, and never alters a running process.
 
 ## The settings card
 
-Shows, as separate facts rather than one status word:
+A collapsed row in **Settings → Plugins**, like every other plugin card: a name
+over a one-line description, a chevron, and an `Unsaved` marker while the row
+holds edits. It reads native because it reuses the shipped card's rules — the
+same `--dsw-alias-*` tokens, the same geometry, the same `.16s` transitions —
+in a stylesheet the bundle injects, since hover, focus rings, and reduced motion
+have no inline equivalent.
 
-- **installed and executable** — the resolved path, where it came from, and the
-  version it reports, for every entry in the platform's catalog;
-- **usable in the current permission mode** — a shell that cannot be confined is
-  listed as blocked, with the measured reason, before the model ever calls it;
-- **whether that confinement fact was verified** — the card warns on a platform
-  whose behavior this plugin has not measured.
+Opening it shows:
 
-**Test shell** runs `echo DSH-SHELL-SELECT-TEST-OK`, a module constant with no
-input, through the same resolve/run path a model call takes. It therefore reports
-the same refusal a model call would get — it never demonstrates a capability the
-tool itself would not grant.
+- every shell in the platform's catalog as a **choice**, each carrying its own
+  reported version, so an uninstalled one reads as *not found* rather than
+  disappearing from the list;
+- an **Automatic** choice, which is what the setting defaults to, labelled with
+  the shell it currently resolves to;
+- the selected shell's facts as **separate statements rather than one status
+  word** — detected path, version, whether it can be confined, the permission
+  mode in force, and whether it is usable under that mode — plus the measured
+  refusal reason when it cannot be;
+- the **executable path**, the **login-shell** toggle, and the WSL **distribution**
+  and **mount root**, each shown only for the shells they apply to.
+
+**Edits are staged and written on Save**, matching the shipped cards: choosing a
+shell, typing a path, or ticking a box changes nothing until you press **Save**,
+and **Discard** drops the lot. A save goes out as **one revision-fenced
+mutation**, so it lands whole or not at all, and the card collapses only after it
+does — a rejected write keeps its diagnostics and your edits in place.
+
+Because the facts follow the *staged* choice, you can see what a shell would
+resolve to before committing to it. What the numbers cannot yet reflect is the
+staged path itself, so **Test shell** says so while edits are outstanding: it
+runs the *saved* selection. The test runs `echo DSH-SHELL-SELECT-TEST-OK`, a
+module constant with no input, through the same resolve/run path a model call
+takes — so it reports the same refusal a model call would get, and never
+demonstrates a capability the tool itself would not grant.
+
+The card also **blocks a save the Host would refuse** — a relative path carrying
+a separator, a mount root that is not a Linux path, a login flag on a shell that
+takes none — with the reason at the field, instead of staging a write that comes
+back rejected.
 
 Both host routes (`/dsh-shell-select/status`, `/dsh-shell-select/test`) are
 registered on the host web server and **refuse any non-loopback peer**. They
@@ -293,7 +319,7 @@ pnpm install
 pnpm test
 ```
 
-132 tests across ten suites. Everything disposable lives under
+155 tests across ten suites. Everything disposable lives under
 `<projectRoot>/.test-tmp/<unique-id>/`, where the project root is this package's
 own directory — never a parent, never a home directory. `test/helpers.mjs`
 refuses to remove a path outside that tree, and no test reads or writes a real
@@ -333,7 +359,7 @@ lane is in, so a lane that stops being covered fails rather than going quiet.
 | `status.spec.mjs` | The separated status facts, the test action's refusal path, the loopback restriction |
 | `settings.spec.mjs` | Persistence across a fresh composition, unrelated edits surviving, a change applying only to later calls |
 | `replacement.spec.mjs` | The guard denying every replaced name and leaving unrelated tools alone |
-| `client.spec.mjs` | The card's bundle contract, slot key, rendered copy, and scope writes |
+| `client.spec.mjs` | The card bundle and its interaction: the slot key, the injected stylesheet and the design tokens it uses, collapsed-by-default disclosure, staging on choose, one revision-fenced save, discard, and the validation that blocks a save the host would refuse |
 
 ## Known limitations
 
