@@ -84,15 +84,21 @@ window.__ModuleLoader__.load({
       notFound: 'not found',
       detected: 'Detected',
       version: 'version',
+      interpreter: 'interpreter',
       mode: 'Permission mode',
       confineable: 'sandbox: can be confined',
       unconfineable: 'sandbox: cannot be confined',
+      observedConfirmed: 'observed: it ran under the sandbox',
+      observedRunnerFailed: 'observed: the sandbox runner could not start it',
+      observedRanUnconfined: 'observed: ran without confinement',
+      observedNotProbed: 'not probed here',
       usableInMode: 'usable in the current permission mode',
       blockedInMode: 'blocked by the current permission mode',
       confinementUnverified: 'Confinement on this platform has not been verified by this plugin.',
       executable: 'Executable path',
       executableHint: 'Leave empty to discover it. Takes effect when you save.',
       clearOverride: 'Clear override',
+      overrideCleared: 'Cleared: this path was set for another shell.',
       replaceable: 'Replaceable',
       loginShell: 'Run as a login shell',
       loginShellHint: 'Sources your profile scripts on every command. Off by default.',
@@ -105,6 +111,7 @@ window.__ModuleLoader__.load({
       refresh: 'Refresh',
       statusFailed: 'Could not read shell status',
       testSaved: 'Test runs the saved selection, not the edits staged here.',
+      testStale: 'The saved selection changed since this test ran.',
       invalid: 'Invalid',
       invalidAbsolute: 'A path containing a separator must be absolute, or the execution environment refuses it.',
       invalidLoginShell: 'This shell takes no login flag; that applies to bash-family shells only.',
@@ -129,15 +136,21 @@ window.__ModuleLoader__.load({
       notFound: '未找到',
       detected: '已检测到',
       version: '版本',
+      interpreter: '解释器',
       mode: '权限模式',
       confineable: '沙箱：可被限制',
       unconfineable: '沙箱：无法被限制',
+      observedConfirmed: '实测：已在沙箱下运行',
+      observedRunnerFailed: '实测：沙箱运行器无法启动它',
+      observedRanUnconfined: '实测：未在沙箱下运行',
+      observedNotProbed: '未在此处探测',
       usableInMode: '在当前权限模式下可用',
       blockedInMode: '被当前权限模式阻止',
       confinementUnverified: '本插件尚未验证该平台的沙箱限制行为。',
       executable: '可执行文件路径',
       executableHint: '留空则自动检测。保存后生效。',
       clearOverride: '清除覆盖',
+      overrideCleared: '已清除：该路径是为另一个 Shell 设置的。',
       replaceable: '可替换',
       loginShell: '以登录 Shell 运行',
       loginShellHint: '每条命令都会加载你的 profile 脚本。默认关闭。',
@@ -150,6 +163,7 @@ window.__ModuleLoader__.load({
       refresh: '刷新',
       statusFailed: '无法读取 Shell 状态',
       testSaved: '测试针对已保存的选择，而不是这里暂存的修改。',
+      testStale: '此测试运行后，已保存的选择发生了变化。',
       invalid: '无效',
       invalidAbsolute: '含路径分隔符的路径必须是绝对路径，否则执行环境会拒绝它。',
       invalidLoginShell: '该 Shell 不接受登录参数；它只适用于 bash 系列。',
@@ -404,27 +418,46 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The staged fields that name *which* shell runs.
+     *
+     * A successful write of any of them makes an earlier "Test shell" result
+     * describe a selection that is no longer in force, so the result is dropped
+     * rather than left on screen looking current.
+     */
+    const SELECTION_FIELDS = ['shell', 'executable', 'wslDistro']
+
+    /** The settings fields one save writes, for the obsolete-result check. */
+    function touchedSelection(ops) {
+      return ops.some(op => SELECTION_FIELDS.includes(op.path[0]))
+    }
+
+    /**
      * The card's form: staged drafts over a bound settings scope, plus the two
      * host reads its controls need.
      *
      * `stored` re-seeds from the scope on every publish so the form always
      * describes what the document holds, and `draft` re-seeds from it on
-     * discard and on a completed save.
+     * discard and on a completed save. Both host reads carry a generation: a
+     * slower, older response never overwrites a newer one.
      */
     class CardController {
       /** @param scope - the bound `shell-select` settings scope. */
       constructor(scope) {
         this.scope = scope
+        this.statusGeneration = 0
+        this.testGeneration = 0
         this.store = createStore({
           available: false,
           writable: false,
           saving: false,
           testing: false,
           failed: false,
+          failure: undefined,
           draft: draftFrom(undefined),
           stored: draftFrom(undefined),
           dirty: false,
           failures: {},
+          overrideCleared: false,
           snapshot: undefined,
           status: undefined,
           test: undefined,
@@ -455,24 +488,48 @@ window.__ModuleLoader__.load({
         })
       }
 
-      /** Stage one draft change. */
+      /**
+       * Stage one draft change.
+       *
+       * Changing the shell drops a staged executable override: that path was
+       * given for the shell being left, and carrying it to the new selection
+       * would either fail the host's identity check or, worse, be paired with
+       * the new shell's launch arguments. The draft says so rather than
+       * dropping it silently.
+       */
       edit(field, value) {
         const current = this.store.getSnapshot()
         if (!current.writable || current.saving) return
-        const draft = { ...current.draft, [field]: value }
+        const changedShell = field === 'shell' && value !== current.draft.shell
+        const clearedOverride = changedShell && current.draft.executable.length > 0
+        const draft = {
+          ...current.draft,
+          [field]: value,
+          ...clearedOverride ? { executable: '' } : {},
+        }
         this.store.set({
           ...current,
           draft,
           failures: planFailures(draft, current.status),
           dirty: saveOps(draft, current.stored).length > 0,
           failed: false,
+          failure: undefined,
+          overrideCleared: clearedOverride,
         })
       }
 
       /** Drop every staged edit. */
       discard() {
         const current = this.store.getSnapshot()
-        this.store.set({ ...current, draft: current.stored, dirty: false, failures: {}, failed: false })
+        this.store.set({
+          ...current,
+          draft: current.stored,
+          dirty: false,
+          failures: {},
+          failed: false,
+          failure: undefined,
+          overrideCleared: false,
+        })
       }
 
       /** Write the staged edits as one revision-fenced mutation. */
@@ -480,46 +537,68 @@ window.__ModuleLoader__.load({
         const current = this.store.getSnapshot()
         const ops = saveOps(current.draft, current.stored)
         if (ops.length === 0 || Object.keys(current.failures).length > 0 || current.saving || !current.writable) return
-        this.store.set({ ...current, saving: true, failed: false })
+        this.store.set({ ...current, saving: true, failed: false, failure: undefined })
         try {
           await this.scope.mutate(ops, current.snapshot?.revision)
           // The scope's subscription republishes on commit, re-seeding draft
           // and stored from what the Host accepted.
-          this.store.set({ ...this.store.getSnapshot(), saving: false })
+          this.store.set({
+            ...this.store.getSnapshot(),
+            saving: false,
+            overrideCleared: false,
+            ...touchedSelection(ops) ? { test: undefined, testCleared: true } : {},
+          })
           await this.refreshStatus()
-        } catch {
+        } catch (error) {
           // The staged values stay in place for correction, and the draft stays
           // dirty so the header keeps reporting unsaved edits.
-          this.store.set({ ...this.store.getSnapshot(), saving: false, failed: true })
+          this.store.set({
+            ...this.store.getSnapshot(),
+            saving: false,
+            failed: true,
+            failure: error instanceof Error ? error.message : String(error),
+          })
         }
       }
 
-      /** Re-read the host's shell facts. */
+      /**
+       * Re-read the host's shell facts.
+       *
+       * Responses are generation-stamped: two reads can be in flight (a save's
+       * own refresh and a manual one), and the older answer must not replace the
+       * newer. A superseded response is discarded rather than published.
+       */
       async refreshStatus() {
+        const generation = ++this.statusGeneration
         try {
           const response = await fetch(STATUS_URL, { headers: { accept: 'application/json' } })
           const body = await response.json()
+          if (generation !== this.statusGeneration) return
           const current = this.store.getSnapshot()
           const status = response.ok ? body : { error: body.error ?? response.status }
           this.store.set({ ...current, status, failures: planFailures(current.draft, status) })
           this.publish()
         } catch (error) {
+          if (generation !== this.statusGeneration) return
           this.store.set({ ...this.store.getSnapshot(), status: { error: String(error) } })
         }
       }
 
       /** Run the host's fixed test command against the saved selection. */
       async testShell() {
-        this.store.set({ ...this.store.getSnapshot(), testing: true })
+        const generation = ++this.testGeneration
+        this.store.set({ ...this.store.getSnapshot(), testing: true, test: undefined, testCleared: false })
         try {
           const response = await fetch(TEST_URL, { method: 'POST', headers: { accept: 'application/json' } })
           const body = await response.json()
+          if (generation !== this.testGeneration) return
           this.store.set({
             ...this.store.getSnapshot(),
             testing: false,
             test: response.ok ? body : { ok: false, detail: body.error ?? String(response.status) },
           })
         } catch (error) {
+          if (generation !== this.testGeneration) return
           this.store.set({ ...this.store.getSnapshot(), testing: false, test: { ok: false, detail: String(error) } })
         }
         await this.refreshStatus()
@@ -538,7 +617,6 @@ window.__ModuleLoader__.load({
       const [menuOpen, setMenuOpen] = React.useState(false)
       const saveStarted = React.useRef(false)
       const { draft, stored, status, failures, writable, dirty, saving, failed } = state
-
       // Collapse only after a save lands whole; a rejected write keeps its
       // diagnostics and staged edits visible for correction. The shipped plugin
       // card applies the same rule.
@@ -592,6 +670,14 @@ window.__ModuleLoader__.load({
       // The facts follow the DRAFT selection, because every catalog row carries
       // its own resolution: picking a shell shows what it would resolve to
       // before the save, which is the point of choosing here.
+      const observedKeys = {
+        confirmed: 'observedConfirmed',
+        'runner-failed': 'observedRunnerFailed',
+        'ran-unconfined': 'observedRanUnconfined',
+        'not-probed': 'observedNotProbed',
+        refused: 'observedNotProbed',
+        'not-run': 'observedNotProbed',
+      }
       const facts = []
       if (selected !== undefined) {
         facts.push(h('span', { key: 'exe', className: selected.available === true ? undefined : 'dsss-factsError' },
@@ -601,10 +687,19 @@ window.__ModuleLoader__.load({
         if (selected.version !== undefined) {
           facts.push(h('span', { key: 'ver' }, `${t('version')}: ${selected.version}`))
         }
+        if (selected.interpreter !== undefined) {
+          facts.push(h('span', { key: 'interp' }, `${t('interpreter')}: ${selected.interpreter}`))
+        }
         if (selected.versionError !== undefined) {
           facts.push(h('span', { key: 'verr', className: 'dsss-factsError' }, selected.versionError))
         }
+        // What the catalog expects, and what this machine was actually seen to
+        // do — two facts, never folded into one claim.
         facts.push(h('span', { key: 'conf' }, selected.confineable ? t('confineable') : t('unconfineable')))
+        if (selected.confinement?.observed !== undefined) {
+          facts.push(h('span', { key: 'obs', className: 'dsss-factsQuiet' },
+            t(observedKeys[selected.confinement.observed] ?? 'observedNotProbed')))
+        }
         if (selected.confineable === false && selected.confineReason !== undefined) {
           facts.push(h('span', { key: 'why', className: 'dsss-factsQuiet' }, selected.confineReason))
         }
@@ -620,7 +715,10 @@ window.__ModuleLoader__.load({
 
       const textField = spec => {
         const name = spec.field
-        const overridden = stored[name].length > 0
+        // The badge and its clear button describe the *staged* value, because
+        // that is what the button acts on: after a clear there is nothing left
+        // to clear, even though the document still holds the old path.
+        const overridden = draft[name].length > 0
         return h('div', { className: 'dsss-field', key: name },
           h('div', { className: 'dsss-head' },
             h('label', { className: 'dsss-label dsss-grow', htmlFor: `dsss-${name}` }, t(spec.label)),
@@ -647,7 +745,9 @@ window.__ModuleLoader__.load({
             onChange: event => { props.edit(name, event.target.value) },
           }),
           h('p', { className: failures[name] === undefined ? 'dsss-hint' : 'dsss-invalid' },
-            t(failures[name] ?? spec.hint)),
+            t(failures[name]
+              ?? (name === 'executable' && state.overrideCleared ? 'overrideCleared' : spec.hint)),
+          ),
         )
       }
 
@@ -758,11 +858,15 @@ window.__ModuleLoader__.load({
                 onClick: () => { void props.refreshStatus() },
               }, t('refresh')),
               dirty ? h('span', { className: 'dsss-hint' }, t('testSaved')) : null,
+              state.testCleared === true ? h('span', { className: 'dsss-hint' }, t('testStale')) : null,
             ),
             testBlock,
 
             h('div', { className: 'dsss-footer' },
-              failed ? h('p', { className: 'dsss-failed', role: 'status' }, t('saveFailed')) : null,
+              failed
+                ? h('p', { className: 'dsss-failed', role: 'status' },
+                  `${t('saveFailed')}${state.failure === undefined ? '' : ` ${state.failure}`}`)
+                : null,
               h('button', {
                 type: 'button',
                 className: 'dsss-discard',

@@ -218,10 +218,10 @@ const STATUS = {
   active: { shell: 'auto', selected: 'cmd', platform: 'windows', mode: 'workspace-write', workspaceRoot: 'D:/work' },
   confinementVerified: true,
   shells: [
-    { id: 'pwsh', label: 'PowerShell', dialect: 'powershell', selected: false, available: true, path: 'C:/pwsh.exe', version: '7.4.1', confineable: true, usableInMode: true, supportsLoginShell: false, supportsDistro: false },
-    { id: 'cmd', label: 'Command Prompt (cmd.exe)', dialect: 'cmd', selected: true, available: true, path: 'C:/cmd.exe', confineable: true, usableInMode: true, supportsLoginShell: false, supportsDistro: false },
-    { id: 'gitbash', label: 'Git Bash', dialect: 'bash', selected: false, available: true, path: 'D:/Git/bin/bash.exe', version: '5.2.15', confineable: false, confineReason: 'measured reason', usableInMode: false, supportsLoginShell: true, supportsDistro: false },
-    { id: 'wsl', label: 'WSL Bash', dialect: 'wsl', selected: false, available: false, detail: 'not found', confineable: false, usableInMode: false, supportsLoginShell: true, supportsDistro: true },
+    { id: 'pwsh', label: 'PowerShell', dialect: 'powershell', selected: false, available: true, path: 'C:/pwsh.exe', version: '7.4.1', confineable: true, confinement: { expected: 'confined', verified: true, observed: 'confirmed' }, usableInMode: true, supportsLoginShell: false, supportsDistro: false },
+    { id: 'cmd', label: 'Command Prompt (cmd.exe)', dialect: 'cmd', selected: true, available: true, path: 'C:/cmd.exe', confineable: true, confinement: { expected: 'confined', verified: true, observed: 'confirmed' }, usableInMode: true, supportsLoginShell: false, supportsDistro: false },
+    { id: 'gitbash', label: 'Git Bash', dialect: 'bash', selected: false, available: true, path: 'D:/Git/bin/bash.exe', version: '5.2.15', confineable: false, confineReason: 'measured reason', confinement: { expected: 'unconfined', verified: true, reason: 'measured reason', observed: 'not-probed' }, usableInMode: false, supportsLoginShell: true, supportsDistro: false },
+    { id: 'wsl', label: 'WSL Bash', dialect: 'wsl', selected: false, available: false, detail: 'not found', confineable: false, confinement: { expected: 'unconfined', verified: true, observed: 'not-probed' }, usableInMode: false, supportsLoginShell: true, supportsDistro: true },
   ],
 }
 
@@ -524,14 +524,169 @@ describe('staged form', () => {
 
   it('keeps the card open and the edits staged when the host rejects the write', async () => {
     const card = await mountCard()
-    card.scope.mutate = async () => { throw new Error('rejected') }
+    card.scope.mutate = async () => { throw new Error('revision mismatch') }
     card.toggle()
     card.select('gitbash')
     card.save()
     await card.settle()
     assert.ok(card.text().includes('did not accept these values'), 'the failure is reported')
+    assert.ok(card.text().includes('revision mismatch'), 'with the reason the host gave')
     assert.ok(card.text().includes('Unsaved'), 'the staged edits are kept for correction')
     assert.equal(card.selectedOption(), 'gitbash')
+  })
+})
+
+describe('an override never follows the user to another shell', () => {
+  it('clears a staged executable override when the shell changes, and says so', async () => {
+    const card = await mountCard({ section: { executable: 'D:/Git/bin/bash.exe' } })
+    card.toggle()
+    assert.ok(card.text().includes('Replaceable'), 'the field reports its override')
+    card.select('cmd')
+    assert.ok(card.text().includes('Cleared: this path was set for another shell.'), 'the clear is announced')
+    assert.ok(!card.text().includes('Replaceable'), 'the override is gone from the draft')
+    card.save()
+    assert.deepEqual(card.scope.calls[0].mutate, [
+      { op: 'set', path: ['shell'], value: 'cmd' },
+      { op: 'unset', path: ['executable'] },
+    ])
+  })
+
+  it('keeps an override typed after the shell change', async () => {
+    const card = await mountCard({ section: { executable: 'D:/Git/bin/bash.exe' } })
+    card.toggle()
+    card.select('cmd')
+    card.props.edit('executable', 'C:/Windows/system32/cmd.exe')
+    card.save()
+    assert.deepEqual(card.scope.calls[0].mutate, [
+      { op: 'set', path: ['shell'], value: 'cmd' },
+      { op: 'set', path: ['executable'], value: 'C:/Windows/system32/cmd.exe' },
+    ])
+  })
+
+  it('leaves an override alone when the shell is re-chosen as itself', async () => {
+    const card = await mountCard({ section: { shell: 'cmd', executable: 'C:/Windows/system32/cmd.exe' } })
+    card.toggle()
+    card.select('cmd')
+    assert.ok(card.text().includes('Replaceable'), 'the same shell is not a change of shell')
+  })
+})
+
+describe('the host reads stay current', () => {
+  it('never lets a slower status read overwrite a newer one', async () => {
+    const card = await mountCard()
+    /** Reads the test holds open, so it can settle them out of order. */
+    const pending = []
+    globalThis.fetch = url => new Promise(resolve => { pending.push({ url, resolve }) })
+    const older = card.props.refreshStatus()
+    const newer = card.props.refreshStatus()
+    assert.equal(pending.length, 2)
+    pending[1].resolve({ ok: true, json: async () => ({ ...STATUS, active: { ...STATUS.active, mode: 'newer' } }) })
+    await newer
+    pending[0].resolve({ ok: true, json: async () => ({ ...STATUS, active: { ...STATUS.active, mode: 'older' } }) })
+    await older
+    assert.equal(card.snapshot().status.active.mode, 'newer', 'the superseded response is discarded')
+  })
+
+  it('drops a test result whose selection has since been saved away', async () => {
+    const card = await mountCard()
+    card.toggle()
+    await card.props.testShell()
+    assert.ok(card.text().includes('exit 0'), 'the test result is shown')
+    card.select('gitbash')
+    card.save()
+    await card.settle()
+    // A completed save collapses the card, so the body is re-opened to read it.
+    card.toggle()
+    assert.ok(!card.text().includes('exit 0'), 'a result for the old selection is not left standing')
+    assert.ok(card.text().includes('changed since this test ran'), 'and the card says why it went')
+  })
+
+  it('keeps a test result when the save did not change the selection', async () => {
+    const card = await mountCard()
+    card.toggle()
+    await card.props.testShell()
+    card.props.edit('loginShell', true)
+    card.save()
+    await card.settle()
+    card.toggle()
+    assert.ok(card.text().includes('exit 0'), 'a login-shell toggle does not invalidate the test')
+  })
+
+  it('re-reads the host status after a test, so the facts match what ran', async () => {
+    const card = await mountCard()
+    const urls = []
+    const inner = globalThis.fetch
+    globalThis.fetch = async (url, options) => { urls.push([url, options?.method ?? 'GET']); return inner(url, options) }
+    card.toggle()
+    await card.props.testShell()
+    assert.deepEqual(urls, [['/dsh-shell-select/test', 'POST'], ['/dsh-shell-select/status', 'GET']])
+  })
+})
+
+describe('Automatic is a first-class selection', () => {
+  it('starts on Automatic and says what it resolves to', async () => {
+    const card = await mountCard()
+    card.toggle()
+    assert.equal(card.selectedOption(), 'auto')
+    assert.match(card.optionText('auto'), /resolves to Command Prompt/)
+  })
+
+  it('shows the resolved shell\'s own facts while Automatic is selected', async () => {
+    const card = await mountCard({ status: { ...STATUS, active: { ...STATUS.active, selected: 'pwsh' } } })
+    card.toggle()
+    const text = card.text()
+    assert.match(card.optionText('auto'), /resolves to PowerShell/)
+    assert.ok(text.includes('C:/pwsh.exe'), 'the executable Automatic resolves to')
+    assert.ok(text.includes('7.4.1'), 'its version')
+    assert.ok(text.includes('sandbox: can be confined'), 'what the catalog expects')
+    assert.ok(text.includes('observed: it ran under the sandbox'), 'and what was observed')
+  })
+
+  it('returns to Automatic after another shell was saved', async () => {
+    const card = await mountCard({ section: { shell: 'cmd' } })
+    card.toggle()
+    assert.equal(card.selectedOption(), 'cmd')
+    card.select('auto')
+    card.save()
+    assert.deepEqual(card.scope.calls[0].mutate, [{ op: 'set', path: ['shell'], value: 'auto' }])
+  })
+
+  it('shows an interpreter where a shell has no version flag', async () => {
+    const card = await mountCard({
+      status: {
+        ...STATUS,
+        active: { ...STATUS.active, platform: 'posix', selected: 'sh' },
+        shells: [{ id: 'sh', label: 'POSIX sh', available: true, path: '/usr/bin/sh', interpreter: 'dash', confineable: true, confinement: { expected: 'confined', verified: false, observed: 'not-probed' }, usableInMode: true, supportsLoginShell: false, supportsDistro: false }],
+      },
+    })
+    card.toggle()
+    assert.ok(card.text().includes('interpreter: dash'))
+    assert.ok(card.text().includes('confirmed') === false, 'a posix row is not reported as observed')
+  })
+})
+
+describe('field values keep their type', () => {
+  it('keeps a text field a string even when it reads like a boolean', async () => {
+    const card = await mountCard({ section: { executable: 'true' } })
+    card.toggle()
+    // The stored string is displayed as written, and an unchanged field writes
+    // nothing — a document saying "true" is not a document saying `true`.
+    const input = elements(card.tree, 'input').find(entry => entry.props.id === 'dsss-executable')
+    assert.equal(input.props.value, 'true', 'the stored string is displayed as written')
+    card.props.edit('executable', 'false')
+    card.save()
+    assert.deepEqual(card.scope.calls[0].mutate, [{ op: 'set', path: ['executable'], value: 'false' }])
+    assert.equal(typeof card.scope.calls[0].mutate[0].value, 'string')
+  })
+
+  it('keeps the WSL distribution a string', async () => {
+    const card = await mountCard({ section: { shell: 'wsl' } })
+    card.toggle()
+    card.props.edit('wslDistro', 'true')
+    card.save()
+    const distro = card.scope.calls[0].mutate.find(op => op.path[0] === 'wslDistro')
+    assert.equal(typeof distro.value, 'string')
+    assert.equal(distro.value, 'true')
   })
 })
 
