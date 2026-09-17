@@ -210,11 +210,11 @@ already resolved, and never alters a running process.
 
 ## The settings card
 
-A collapsed row in **Settings → Plugins**, like every other plugin card: a name
-over a one-line description, a chevron, and an `Unsaved` marker while the row
-holds edits. It reads native because it reuses the shipped card's rules — the
-same `--dsw-alias-*` tokens, the same geometry, the same `.16s` transitions, the
-same `Menu` dropdown the other settings rows use — carried in a stylesheet the
+A collapsed row titled **Shell selection** in **Settings → Plugins**, like every
+other plugin card: a name over a one-line description, a chevron, and an
+`Unsaved` marker while the row holds edits. It reads native because it reuses
+the shipped card's rules — the same `--dsw-alias-*` tokens, the same geometry,
+the same `.16s` transitions, the same `Menu` dropdown the other settings rows use — carried in a stylesheet the
 bundle injects, since hover, focus rings, and reduced motion have no inline
 equivalent.
 

@@ -66,7 +66,7 @@ window.__ModuleLoader__.load({
 
     /** Copy for both supported UI languages. */
     const en = {
-      title: 'Shell',
+      title: 'Shell selection',
       description: 'Choose the shell every command runs in.',
       unsaved: 'Unsaved',
       save: 'Save',
@@ -77,7 +77,7 @@ window.__ModuleLoader__.load({
       expand: 'Show settings',
       collapse: 'Hide settings',
       platform: 'Platform',
-      shell: 'Shell',
+      backend: 'Backend',
       currentShell: 'saved',
       auto: 'Automatic',
       autoResolves: 'resolves to',
@@ -111,7 +111,7 @@ window.__ModuleLoader__.load({
       invalidMountRoot: 'The mount root must be an absolute Linux path.',
     }
     const zh = {
-      title: 'Shell',
+      title: 'Shell 选择',
       description: '选择命令运行所使用的 Shell。',
       unsaved: '未保存',
       save: '保存',
@@ -122,7 +122,7 @@ window.__ModuleLoader__.load({
       expand: '展开设置',
       collapse: '收起设置',
       platform: '平台',
-      shell: 'Shell',
+      backend: '后端',
       currentShell: '已保存',
       auto: '自动',
       autoResolves: '解析为',
@@ -250,7 +250,7 @@ window.__ModuleLoader__.load({
 .dsss-factsQuiet { color: var(--dsw-alias-label-tertiary); }
 .dsss-factsError { color: var(--dsw-alias-label-error); }
 
-.dsss-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 12px 0 0; }
+.dsss-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 20px 0 6px; }
 .dsss-footer {
   display: flex; align-items: center; justify-content: flex-end; gap: 8px;
   padding: 12px 0 4px; border-top: 0.5px solid var(--dsw-alias-border-l2);
@@ -680,7 +680,7 @@ window.__ModuleLoader__.load({
             h('div', { className: 'dsss-field' },
               h('div', { className: 'dsss-row' },
                 h('div', { className: 'dsss-rowText' },
-                  h('div', { className: 'dsss-rowTitle' }, t('shell')),
+                  h('div', { className: 'dsss-rowTitle' }, t('backend')),
                   h('div', { className: 'dsss-rowDesc' }, [
                     `${t('platform')}: ${platform ?? '…'}`,
                     // Compared as setting VALUES: `auto` and a shell that auto

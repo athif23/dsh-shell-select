@@ -377,7 +377,7 @@ describe('client bundle', () => {
 describe('collapsible card', () => {
   it('renders collapsed by default, like its sibling cards', async () => {
     const card = await mountCard()
-    assert.ok(card.text().includes('Shell'), 'the header names the card')
+    assert.ok(card.text().includes('Shell selection'), 'the header names the card distinctly from the shipped Shell card')
     assert.ok(card.text().includes('Choose the shell every command runs in.'), 'the header describes it')
     assert.equal(card.hasMenu(), false, 'the dropdown is not rendered while collapsed')
     assert.equal(elements(card.tree, 'input').length, 0, 'fields are not rendered while collapsed')
@@ -402,6 +402,17 @@ describe('collapsible card', () => {
     assert.equal(card.buttons('dsss-save').length, 1)
     assert.equal(card.buttons('dsss-discard').length, 1)
     assert.equal(card.buttons('dsss-tool').length, 2, 'test and refresh')
+  })
+
+  it('does not repeat the card name on its own row', async () => {
+    // The list already holds the shipped card titled "Shell", so a second card
+    // under the same word is ambiguous in the navigation; the row inside names
+    // the setting rather than repeating the card's own name.
+    const card = await mountCard()
+    card.toggle()
+    assert.ok(card.text().includes('Shell selection'))
+    assert.ok(card.text().includes('Backend'))
+    assert.ok(!card.text().includes('Shell | '), 'the row does not repeat the card name')
   })
 
   it('opens as a dropdown anchored to its trigger', async () => {
