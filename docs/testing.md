@@ -90,7 +90,7 @@ than the Windows lane, because the two profiles grant different roots. The Linux
 `workspace-write` profile grants `/tmp` writable, so a fixture under `/tmp`
 cannot test that a write outside the workspace is denied: the write succeeds
 because the location is granted. CI therefore names a scratch root outside both
-the profile and `/tmp` (`/mnt/dsh-shell-select`), the suite refuses to assert the
+the profile and `/tmp` (`/var/tmp/dsh-shell-select`), the suite refuses to assert the
 denial from a `/tmp` fixture and says which variable to set instead, and Windows
 is where the file outcome has actually been measured.
 
@@ -129,7 +129,7 @@ falling back to the profile:
 
 ```sh
 # Linux, macOS, or Git Bash
-DSH_SHELL_SELECT_TEST_TMP=/tmp/dsh-shell-select pnpm test
+DSH_SHELL_SELECT_TEST_TMP=/var/tmp/dsh-shell-select pnpm test
 ```
 
 ```powershell

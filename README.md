@@ -186,7 +186,7 @@ profile (a clone in `$HOME`, a CI runner) must name an approved root outside it:
 
 ```sh
 # Linux, macOS, or Git Bash
-DSH_SHELL_SELECT_TEST_TMP=/tmp/dsh-shell-select pnpm test
+DSH_SHELL_SELECT_TEST_TMP=/var/tmp/dsh-shell-select pnpm test
 ```
 
 ```powershell
