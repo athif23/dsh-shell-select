@@ -12,8 +12,9 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
 import { ShellSelectConfig, ShellSelectExecutor } from '../src/executor.js'
+import { localPlatform } from '../src/catalog.js'
 import { STATUS_ROUTE_PREFIX, buildStatus, registerStatusRoutes, runShellTest } from '../src/status.js'
-import { makeContext, makeFixture, removeFixture, stubSandbox, stubSubprocess } from './helpers.mjs'
+import { makeContext, makeFixture, removeFixture, stubSandbox, stubSubprocess, workdirFor } from './helpers.mjs'
 
 const fixture = makeFixture('status')
 after(() => { removeFixture(fixture) })
@@ -40,11 +41,15 @@ async function mount(config, options = {}) {
     outcome: options.outcome,
   })
   const sandbox = options.sandbox ?? stubSandbox()
+  // The policy's workspace root is the directory a probe runs in, so it follows
+  // the platform the composition is asked about, not this host's shape.
+  const policyRoot = options.workspaceRoot
+    ?? workdirFor(options.platform ?? 'windows', workspace)
   const context = await makeContext({
     mode: options.mode ?? 'workspace-write',
     subprocess,
     sandbox,
-    workspaceRoot: options.workspaceRoot ?? workspace,
+    workspaceRoot: policyRoot,
   })
   const routes = new Map()
   await context.plugin({
@@ -61,7 +66,7 @@ async function mount(config, options = {}) {
   await context.plugin(ShellSelectExecutor, ShellSelectConfig(config))
   const shell = context.shell
   await shell.ready
-  return { ctx: context, shell, routes, subprocess, sandbox }
+  return { ctx: context, shell, routes, subprocess, sandbox, policyRoot }
 }
 
 /** Invoke a registered route with a minimal request/response pair. */
@@ -84,13 +89,13 @@ async function call(route, options = {}) {
 
 describe('status payload', () => {
   it('reports the selected shell, the platform, and the resolved mode', async () => {
-    const { ctx, shell } = await mount({ shell: 'cmd' })
+    const { ctx, shell, policyRoot } = await mount({ shell: 'cmd' })
     const status = await buildStatus(ctx, shell)
     assert.equal(status.active.shell, 'cmd')
     assert.equal(status.active.selected, 'cmd')
     assert.equal(status.active.platform, 'windows')
     assert.equal(status.active.mode, 'workspace-write')
-    assert.equal(status.active.workspaceRoot, workspace)
+    assert.equal(status.active.workspaceRoot, policyRoot)
     assert.deepEqual(status.shells.map(row => row.id), ['pwsh', 'powershell', 'cmd', 'gitbash', 'wsl'])
   })
 
@@ -151,10 +156,20 @@ describe('status payload', () => {
   })
 
   it('never probes an executable whose workspace cannot be validated', async () => {
-    const { ctx, shell, subprocess } = await mount({ shell: 'cmd' }, { workspaceRoot: join(fixture, 'gone') })
+    // A missing workspace is a local fact, so it is caught on this host's own
+    // platform — the case a typo has to be caught in.
+    const host = localPlatform()
+    const { ctx, shell, subprocess } = await mount(
+      host === 'windows' ? { shell: 'cmd' } : { shell: 'bash' },
+      {
+        platform: host,
+        workspaceRoot: join(fixture, 'gone'),
+        resolvable: host === 'windows' ? WINDOWS_EXES : { bash: '/bin/bash' },
+      },
+    )
     const status = await buildStatus(ctx, shell)
-    const cmd = status.shells.find(row => row.id === 'cmd')
-    assert.match(cmd.versionError, /probe not run: .*working directory does not exist/u)
+    const row = status.shells.find(entry => entry.id === (host === 'windows' ? 'cmd' : 'bash'))
+    assert.match(row.versionError, /probe not run: .*working directory does not exist/u)
     assert.equal(subprocess.spawns.length, 0, 'a probe stops before spawning, like a command does')
   })
 

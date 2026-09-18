@@ -19,13 +19,14 @@ import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
 import { ShellSelectConfig, ShellSelectExecutor } from '../src/executor.js'
 import { registerShellTool } from '../src/tool.js'
-import { makeContext, makeFixture, removeFixture, stubSandbox, stubSubprocess } from './helpers.mjs'
+import { makeContext, makeFixture, removeFixture, stubSandbox, stubSubprocess, workdirFor } from './helpers.mjs'
 
 const fixture = makeFixture('tool')
 after(() => { removeFixture(fixture) })
 
-const workdir = join(fixture, 'work')
-mkdirSync(workdir, { recursive: true })
+/** The stub seam answers for Windows, so the workdir is shaped for it. */
+const workdir = workdirFor('windows', join(fixture, 'work'))
+mkdirSync(join(fixture, 'work'), { recursive: true })
 
 const WINDOWS_EXES = {
   'C:\\Program Files\\PowerShell\\7\\pwsh.exe': 'C:\\Program Files\\PowerShell\\7\\pwsh.exe',

@@ -35,6 +35,8 @@ export const LANES = Object.freeze({
     // Every supported POSIX host has bash, and it is the shell the harness's own
     // executor runs, so it is the lane's baseline.
     required: Object.freeze(['bash']),
+    // `sh` is here rather than appended by the suite: it is a POSIX row, so a
+    // Windows host has no such shell to skip for.
     optional: Object.freeze(['zsh', 'fish', 'sh', 'pwsh']),
     driver: 'bash',
     command: 'bash',

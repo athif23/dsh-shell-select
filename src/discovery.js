@@ -23,7 +23,7 @@
 import { statSync } from 'node:fs'
 import { posix } from 'node:path'
 import { SubprocessExecutableNotFoundError } from '@deepseek-ai/dsh-subprocess'
-import { catalogFor, checkIdentity } from './catalog.js'
+import { catalogFor, checkIdentity, localPlatform } from './catalog.js'
 
 /**
  * The absolute-path test each execution platform uses for a working directory.
@@ -131,10 +131,18 @@ export async function inspectShell(ctx, options) {
  * directory would run the command somewhere the caller did not ask for, which is
  * the failure this check exists to prevent.
  *
- * This reads the local filesystem, so it describes the local execution world.
- * The compositions this plugin ships for run their shell locally; a deployment
- * that seats `ctx.subprocess` on a remote provider should read the check as a
- * typo guard for the local path, not as a statement about the remote directory.
+ * The two checks answer different questions, and only one of them is local:
+ *
+ * - **Shape** is a pure function of the platform, so it always runs. A path that
+ *   is not absolute *for the execution platform* is refused wherever this code
+ *   runs, which is what stops a `/tmp` from being handed to Windows.
+ * - **Existence** is a fact about one filesystem. It is therefore checked only
+ *   when the path belongs to this process's own platform; for any other platform
+ *   the local answer describes the wrong machine, and a `statSync` here would
+ *   refuse a directory that is perfectly valid in the execution world (a Windows
+ *   path checked from a Linux host driving a Windows sandbox host, for example).
+ *   There, the provider that owns that filesystem is what refuses a missing
+ *   directory, at spawn.
  * @param workdir - the resolved working directory.
  * @param platform - `'windows'` or `'posix'`, choosing the absolute-path rule.
  * @returns the validated path.
@@ -151,6 +159,7 @@ export function requireWorkingDirectory(workdir, platform) {
       `dsh-shell-select: the working directory must be an absolute ${platform} path, got ${JSON.stringify(workdir)}`,
     )
   }
+  if (platform !== localPlatform()) return workdir
   let stat
   try {
     stat = statSync(workdir)

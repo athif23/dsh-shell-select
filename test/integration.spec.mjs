@@ -208,7 +208,7 @@ describe(`${HOST_PLATFORM} lane: the required shells`, () => {
 describe(`${HOST_PLATFORM} lane: the optional shells`, () => {
   // Optional shells may be absent on a real host, so each case skips with the
   // reason rather than failing the lane.
-  for (const id of [...LANE.optional, ...(LANE.driver === 'bash' ? ['sh'] : [])]) {
+  for (const id of LANE.optional) {
     it(`${id} runs a command when installed`, async (t) => {
       const { ctx, shell } = await boot({ shell: id })
       try {

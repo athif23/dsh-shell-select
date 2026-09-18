@@ -122,6 +122,22 @@ describe('the catalog names shells, not paths', () => {
     assert.match(refused.detail, /expected bash\.exe/u)
   })
 
+  it('writes Windows paths in Windows form, whatever host asks for them', () => {
+    // The catalog for a platform must not vary by host: `node:path.join` would
+    // produce `D:\Git/bin/bash.exe` on a POSIX host, which is neither a Windows
+    // path nor a POSIX one, and a Linux run is where that regressed. Every
+    // absolute Windows candidate — this plugin's own and the ones the harness
+    // contributes — has to come back with backslashes.
+    for (const entry of catalogFor('windows')) {
+      for (const candidate of entry.candidates(WINDOWS_ENV)) {
+        assert.ok(!candidate.includes('/'), `${entry.id} produced a host-shaped path: ${candidate}`)
+        if (/^[A-Za-z]:/u.test(candidate)) {
+          assert.match(candidate, /^[A-Za-z]:\\/u, `${entry.id} produced a drive path without a separator: ${candidate}`)
+        }
+      }
+    }
+  })
+
   it('excludes the WSL launcher and Store shims from the Git Bash PATH scan', () => {
     for (const candidate of findEntry('windows', 'gitbash').candidates(WINDOWS_ENV)) {
       const lower = candidate.toLowerCase()

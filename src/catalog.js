@@ -12,13 +12,16 @@
  *    exported `candidatePwshPaths` rather than restated here.
  * 2. **The platform is an input, not a branch.** Every function takes
  *    `'windows' | 'posix'`, so the catalog for either platform can be exercised
- *    from either platform and the shared logic stays testable.
+ *    from either platform and the shared logic stays testable. Windows path text
+ *    is built with `win32.join`, never `node:path`'s host-dependent `join`: the
+ *    Windows catalog has to be the same catalog on every machine that asks for
+ *    it, and `D:\Git/bin/bash.exe` is not a Windows path.
  *
  * @module dsh-shell-select/catalog
  */
 
 import { candidatePwshPaths } from '@deepseek-ai/dsh-pwsh-local'
-import { join } from 'node:path'
+import { win32 } from 'node:path'
 
 /**
  * The program name in a path, for either platform's separators.
@@ -31,6 +34,18 @@ import { join } from 'node:path'
  */
 export function programName(candidate) {
   return candidate.split(/[\\/]/u).pop() ?? candidate
+}
+
+/**
+ * The platform this process runs on.
+ *
+ * The catalog, the working-directory rule, and the executor all need this one
+ * fact, and a rule keyed to the host platform has to be the same platform
+ * everywhere it is asked about.
+ * @returns `'windows'` or `'posix'`.
+ */
+export function localPlatform() {
+  return process.platform === 'win32' ? 'windows' : 'posix'
 }
 
 /** Execution-world platform words, as `ctx.subprocess.terminalEnvironment` reports them. */
@@ -119,13 +134,13 @@ function gitRootsFromPath(env) {
 function gitBashCandidates(env) {
   const candidates = []
   for (const root of gitRootsFromPath(env)) {
-    candidates.push(join(root, 'bin', 'bash.exe'))
-    candidates.push(join(root, 'usr', 'bin', 'bash.exe'))
+    candidates.push(win32.join(root, 'bin', 'bash.exe'))
+    candidates.push(win32.join(root, 'usr', 'bin', 'bash.exe'))
   }
   for (const entry of pathEntries(env)) {
     const lower = entry.toLowerCase()
     if (lower.includes('system32') || lower.includes('windowsapps')) continue
-    candidates.push(join(entry, 'bash.exe'))
+    candidates.push(win32.join(entry, 'bash.exe'))
   }
   candidates.push('bash.exe')
   return candidates
@@ -133,14 +148,21 @@ function gitBashCandidates(env) {
 
 /**
  * PowerShell candidates from the harness's own well-known list.
+ *
+ * The harness builds that list with `node:path.join`, so on a POSIX host it
+ * arrives with POSIX separators inside Windows paths. The catalog normalizes
+ * them back into Windows form: what it hands to `resolveExecutable` has to
+ * describe the execution platform, not the host this code happens to run on.
  * @param env - environment to read.
  * @param pick - which part of the list this entry owns.
- * @returns candidate paths.
+ * @returns candidate paths, in Windows form.
  */
 function powershellCandidates(env, pick) {
   const known = candidatePwshPaths(env)
   const isWindowsPowershell = candidate => candidate.toLowerCase().includes('windowspowershell')
-  return known.filter(candidate => pick === 'legacy' ? isWindowsPowershell(candidate) : !isWindowsPowershell(candidate))
+  return known
+    .filter(candidate => pick === 'legacy' ? isWindowsPowershell(candidate) : !isWindowsPowershell(candidate))
+    .map(candidate => win32.normalize(candidate))
 }
 
 /**
@@ -229,7 +251,7 @@ const ENTRIES = {
         const systemRoot = envValue(env, 'SystemRoot')
         return [...new Set([
           'wsl.exe',
-          ...systemRoot === undefined ? [] : [join(systemRoot, 'System32', 'wsl.exe')],
+          ...systemRoot === undefined ? [] : [win32.join(systemRoot, 'System32', 'wsl.exe')],
         ])]
       },
       supportsLoginShell: true,

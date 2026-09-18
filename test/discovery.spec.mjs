@@ -12,9 +12,9 @@ import assert from 'node:assert/strict'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
-import { findEntry } from '../src/catalog.js'
+import { findEntry, localPlatform } from '../src/catalog.js'
 import { inspectCatalog, inspectShell, requireWorkingDirectory, resolveShell } from '../src/discovery.js'
-import { makeContext, makeFixture, removeFixture, stubSubprocess } from './helpers.mjs'
+import { makeContext, makeFixture, removeFixture, stubSubprocess, workdirFor } from './helpers.mjs'
 
 const fixture = makeFixture('discovery')
 after(() => { removeFixture(fixture) })
@@ -154,14 +154,22 @@ describe('inspectCatalog', () => {
 })
 
 describe('requireWorkingDirectory', () => {
+  /** This process's own platform: the only one whose filesystem is answerable here. */
+  const host = localPlatform()
+  /** The other platform, which a local `stat` must not be asked about. */
+  const foreign = host === 'windows' ? 'posix' : 'windows'
+
   it('accepts a real directory on the platform it belongs to', () => {
-    assert.equal(requireWorkingDirectory(workdir, 'windows'), workdir)
-    assert.equal(requireWorkingDirectory(process.cwd(), 'windows'), process.cwd())
+    // Real directories and the platform that owns them are the same platform
+    // here, which is the case the existence rule is for.
+    assert.equal(requireWorkingDirectory(workdir, host), workdir)
+    assert.equal(requireWorkingDirectory(process.cwd(), host), process.cwd())
   })
 
   it('applies the platform absolute-path rule, not the host one', () => {
     // A POSIX path is not absolute to Windows, and a drive path is not absolute
-    // to POSIX, whatever machine the check runs on.
+    // to POSIX, whatever machine the check runs on. Shape is a pure function of
+    // the platform, so it is answered the same way everywhere.
     assert.throws(
       () => requireWorkingDirectory('/tmp', 'windows'),
       /must be an absolute windows path/u,
@@ -174,11 +182,22 @@ describe('requireWorkingDirectory', () => {
     assert.throws(() => requireWorkingDirectory('relative/dir', 'posix'), /absolute posix path/u)
   })
 
+  it('answers shape for the other platform and its filesystem only for this one', () => {
+    // The path is right for the platform that owns it, so nothing is refused:
+    // a `stat` here would be answering for the wrong machine. The plugin leaves
+    // that refusal to the provider that owns the filesystem.
+    const shaped = workdirFor(foreign, workdir)
+    assert.equal(requireWorkingDirectory(shaped, foreign), shaped)
+    // And this host's own path is still refused for a platform it does not
+    // belong to, by shape, without any filesystem call.
+    assert.throws(() => requireWorkingDirectory(workdir, foreign), /must be an absolute/u)
+  })
+
   it('refuses a missing directory and never substitutes another', () => {
     const gone = join(fixture, 'deleted')
     let captured
     try {
-      requireWorkingDirectory(gone, 'windows')
+      requireWorkingDirectory(gone, host)
     } catch (error) {
       captured = error
     }
@@ -186,12 +205,12 @@ describe('requireWorkingDirectory', () => {
     // The refusal names the directory that was asked for: a substitute would
     // have to appear in its place, which is what a check has to rule out.
     assert.ok(captured.message.includes(gone), 'the error must name the requested directory')
-    assert.equal(requireWorkingDirectory(fixture, 'windows'), fixture, 'a real directory still passes')
+    assert.equal(requireWorkingDirectory(fixture, host), fixture, 'a real directory still passes')
   })
 
   it('refuses a file and an empty value', () => {
-    assert.throws(() => requireWorkingDirectory(aFile, 'windows'), /not a directory/u)
-    assert.throws(() => requireWorkingDirectory('', 'windows'), /without a working directory/u)
+    assert.throws(() => requireWorkingDirectory(aFile, host), /not a directory/u)
+    assert.throws(() => requireWorkingDirectory('', host), /without a working directory/u)
     assert.throws(() => requireWorkingDirectory(workdir, 'plan9'), /unknown platform/u)
   })
 })

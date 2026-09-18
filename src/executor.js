@@ -29,7 +29,15 @@ import {
   matchesSignature,
 } from '@deepseek-ai/dsh-sandbox'
 import { buildInvocation, transportEnv } from './dialects.js'
-import { AUTO_SHELL, catalogFor, checkConfinement, entryClaiming, findEntry, programName } from './catalog.js'
+import {
+  AUTO_SHELL,
+  catalogFor,
+  checkConfinement,
+  entryClaiming,
+  findEntry,
+  localPlatform,
+  programName,
+} from './catalog.js'
 import { inspectCatalog, inspectShell, requireWorkingDirectory, resolveShell } from './discovery.js'
 
 /** Settings namespace owning the shell selection. */
@@ -133,11 +141,6 @@ export class ShellSelectionRefusedError extends Error {
 
 /** The local executor class this platform seats under the selector. */
 const PLATFORM_BASE = process.platform === 'win32' ? PwshLocalExecutor : LocalBashExecutor
-
-/** The platform word matching the local process, used before the seam answers. */
-function localPlatform() {
-  return process.platform === 'win32' ? 'windows' : 'posix'
-}
 
 /**
  * One call's settings snapshot: the fields a call depends on, copied out of the
@@ -726,12 +729,18 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
   /**
    * Start one background command, confined unless the mode is `danger-full-access`.
    * @param spec - a spec from {@link ShellSelectExecutor.resolve}, decided or not.
-   * @returns the live process handle.
+   * @returns the live process handle, carrying the same `sandbox` facts a
+   *   foreground result does: `danger-full-access` reports itself as unconfined
+   *   rather than reporting nothing, so a caller reads one contract either way.
    */
   async start(spec) {
     const { decision, spec: decidedSpec } = await this.decideFor(spec)
     const mode = decidedSpec.sandboxPolicy.mode
-    if (mode === 'danger-full-access') return this.startArgv(decidedSpec, decision.argv)
+    if (mode === 'danger-full-access') {
+      const unconfined = this.startArgv(decidedSpec, decision.argv)
+      unconfined.sandbox = { mode, denied: false }
+      return unconfined
+    }
     const confined = await this.ctx.sandbox.confine(
       decision.argv,
       { ...decidedSpec.sandboxPolicy, mode },
