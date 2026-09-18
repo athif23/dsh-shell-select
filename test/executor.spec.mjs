@@ -19,6 +19,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
 import { ShellSelectConfig, ShellSelectExecutor, ShellSelectionRefusedError } from '../src/executor.js'
+import { localPlatform } from '../src/catalog.js'
 import { shellDescription } from '../src/tool.js'
 import { makeContext, makeFixture, removeFixture, stubSandbox, stubSubprocess, workdirFor } from './helpers.mjs'
 
@@ -40,6 +41,19 @@ const WINDOWS_EXES = {
   'bash.exe': 'D:\\Git\\bin\\bash.exe',
   'pwsh.exe': 'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
 }
+
+/**
+ * This host's own platform, a shell it has there, and the executables the stub
+ * knows for them.
+ *
+ * The working-directory existence rule is checked only for the platform this
+ * process runs on — a local `stat` cannot answer for another machine — so a case
+ * that depends on it has to run as this host, with a fixture path of this host's
+ * own shape.
+ */
+const host = localPlatform() === 'windows'
+  ? { platform: 'windows', shell: 'cmd', resolvable: WINDOWS_EXES }
+  : { platform: 'posix', shell: 'bash', resolvable: { bash: '/bin/bash' } }
 
 /** Mount the executor over the stubs. */
 async function mount(config, options = {}) {
@@ -94,9 +108,26 @@ describe('refuses before any process exists', () => {
   })
 
   it('fails a missing working directory', async () => {
-    const { shell, subprocess, wd } = await mount({ shell: 'cmd' })
+    // Existence is a fact about one filesystem, so this case runs on the platform
+    // this process is on, with a fixture path of that platform's own shape: the
+    // existence rule is what must refuse, and a path shaped for another platform
+    // would be refused by the shape rule before it was ever looked for.
+    const { shell, subprocess } = await mount(
+      { shell: host.shell },
+      { platform: host.platform, resolvable: host.resolvable },
+    )
     const { error } = await attempt(shell, { command: 'echo hi', workdir: missingWorkdir })
     assert.match(error.message, /working directory does not exist/u)
+    assert.equal(subprocess.spawns.length, 0)
+  })
+
+  it('fails a working directory shaped for another platform', async () => {
+    // The shape rule is a pure function of the platform, so it answers the same
+    // way on every host — this POSIX path is refused by a Windows composition
+    // wherever the suite runs.
+    const { shell, subprocess, wd } = await mount({ shell: 'cmd' })
+    const { error } = await attempt(shell, { command: 'echo hi', workdir: '/tmp/work' })
+    assert.match(error.message, /must be an absolute windows path/u)
     assert.equal(subprocess.spawns.length, 0)
   })
 
@@ -435,6 +466,80 @@ describe('auto selection', () => {
       { platform: 'posix', defaultShell: '/bin/bash', resolvable: { bash: '/bin/bash' } },
     )
     assert.equal(posix.shell.describeShell().id, 'bash')
+  })
+})
+
+describe('auto resolves for itself, not through the selection', () => {
+  /** The policy a decision needs; the root is carried, never validated here. */
+  const policy = mode => ({ mode, workspaceRoot: workdir })
+
+  /** What a call under the current settings would actually run. */
+  async function decidedShell(mounted) {
+    const decided = await mounted.shell.decide(mounted.shell.resolve({
+      command: 'echo hi', workdir: mounted.wd, sandboxPolicy: policy('danger-full-access'),
+    }))
+    return decided.decision.shell
+  }
+
+  it('names the shell the machine picks while another one is selected', async () => {
+    // An explicit selection and Automatic are different questions: Git Bash is
+    // selected here, and the catalog order — not the selection — decides what
+    // Automatic would run.
+    const mounted = await mount({ shell: 'gitbash' })
+    const auto = await mounted.shell.resolveAuto()
+    assert.equal(auto.entry.id, 'pwsh')
+    assert.equal(auto.available, true)
+    assert.equal(auto.path, 'C:\\Program Files\\PowerShell\\7\\pwsh.exe')
+    assert.equal(auto.source, 'discovered')
+    assert.equal(mounted.shell.describeShell().id, 'gitbash', 'the selection is unchanged by asking')
+  })
+
+  it('lets an executable override name the shell auto runs', async () => {
+    // `resolveEntry` gives an override that names a shell the claim, so the two
+    // configurations the card distinguishes — with and without the override —
+    // resolve differently, and the override's own path is what runs.
+    const mounted = await mount({ shell: 'cmd' })
+    const withOverride = await mounted.shell.resolveAuto({ executable: 'D:\\Git\\bin\\bash.exe' })
+    assert.equal(withOverride.entry.id, 'gitbash')
+    assert.equal(withOverride.path, 'D:\\Git\\bin\\bash.exe')
+    assert.equal(withOverride.source, 'configured')
+    const without = await mounted.shell.resolveAuto({ executable: '' })
+    assert.equal(without.entry.id, 'pwsh')
+    assert.notEqual(without.path, withOverride.path)
+  })
+
+  it('follows the world\'s preference where it is a real one', async () => {
+    const mounted = await mount(
+      { shell: 'cmd' },
+      { platform: 'posix', defaultShell: '/usr/bin/fish', resolvable: { bash: '/bin/bash', fish: '/usr/bin/fish' } },
+    )
+    assert.equal((await mounted.shell.resolveAuto()).entry.id, 'fish')
+  })
+
+  it('reports a machine with nothing to pick rather than a shell name', async () => {
+    const mounted = await mount({ shell: 'cmd' }, { resolvable: {} })
+    const auto = await mounted.shell.resolveAuto()
+    assert.equal(auto.entry, undefined)
+    assert.equal(auto.available, false)
+    assert.match(auto.detail, /no shell in the windows catalog resolved/u)
+    assert.ok(!auto.detail.includes('"auto"'), 'the setting is not reported as a missing shell')
+  })
+
+  it('is what a call would run when the selection is auto', async () => {
+    // The property the card depends on: what it shows for Automatic is the shell
+    // a command resolves to, and the executable it resolves to, for the same
+    // configuration.
+    for (const config of [
+      { shell: 'auto' },
+      { shell: 'auto', executable: 'D:\\Git\\bin\\bash.exe' },
+      { shell: 'auto', executable: 'D:\\Git\\bin\\bash.exe', loginShell: true },
+    ]) {
+      const mounted = await mount(config)
+      const auto = await mounted.shell.resolveAuto()
+      const shell = await decidedShell(mounted)
+      assert.equal(auto.entry.id, shell.id, JSON.stringify(config))
+      assert.equal(auto.path, shell.executable, JSON.stringify(config))
+    }
   })
 })
 
