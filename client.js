@@ -96,15 +96,16 @@ window.__ModuleLoader__.load({
       autoUnknownHint: 'Automatic is resolved from the saved selection; save to see which shell this executable path runs.',
       notFound: 'not found',
       detected: 'Detected',
-      version: 'version',
-      interpreter: 'interpreter',
+      version: 'Version',
+      interpreter: 'Interpreter',
       mode: 'Permission mode',
-      confineable: 'sandbox: can be confined',
-      unconfineable: 'sandbox: cannot be confined',
+      sandbox: 'Sandbox',
+      confineable: 'can be confined',
+      unconfineable: 'cannot be confined',
       observedConfirmed: 'observed: it ran under the sandbox',
-      observedRunnerFailed: 'observed: the sandbox runner could not start it',
       observedRanUnconfined: 'observed: ran without confinement',
       observedNotProbed: 'not probed here',
+      notReported: 'not reported',
       usableInMode: 'usable in the current permission mode',
       blockedInMode: 'blocked by the current permission mode',
       confinementUnverified: 'Confinement on this platform has not been verified by this plugin.',
@@ -155,12 +156,13 @@ window.__ModuleLoader__.load({
       version: '版本',
       interpreter: '解释器',
       mode: '权限模式',
-      confineable: '沙箱：可被限制',
-      unconfineable: '沙箱：无法被限制',
+      sandbox: '沙箱',
+      confineable: '可被限制',
+      unconfineable: '无法被限制',
       observedConfirmed: '实测：已在沙箱下运行',
-      observedRunnerFailed: '实测：沙箱运行器无法启动它',
       observedRanUnconfined: '实测：未在沙箱下运行',
       observedNotProbed: '未在此处探测',
+      notReported: '未报告',
       usableInMode: '在当前权限模式下可用',
       blockedInMode: '被当前权限模式阻止',
       confinementUnverified: '本插件尚未验证该平台的沙箱限制行为。',
@@ -279,9 +281,22 @@ window.__ModuleLoader__.load({
    it is not installed. Truncates with the label, never wraps. */
 .dsss-optMeta { color: var(--dsw-alias-label-tertiary); }
 
-.dsss-facts { display: flex; flex-direction: column; gap: 2px; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-secondary); }
-.dsss-factsQuiet { color: var(--dsw-alias-label-tertiary); }
-.dsss-factsError { color: var(--dsw-alias-label-error); }
+/* The facts: one labelled row per question, its reason under the value it
+   explains. A two-column grid is what makes "which is which" answerable at a
+   glance — the label column is quiet, the value column carries the fact, and a
+   note spans it, so a long measured reason reads as belonging to the row above
+   rather than as another entry in a list. */
+.dsss-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 3px 10px;
+  font-size: 12px; line-height: 1.5;
+}
+.dsss-factLabel { color: var(--dsw-alias-label-tertiary); }
+.dsss-factValue { min-width: 0; color: var(--dsw-alias-label-secondary); word-break: break-word; }
+.dsss-factQuiet { color: var(--dsw-alias-label-tertiary); }
+.dsss-factError { color: var(--dsw-alias-label-error); }
+.dsss-factNote { grid-column: 2; color: var(--dsw-alias-label-tertiary); word-break: break-word; }
 
 .dsss-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 20px 0 6px; }
 .dsss-footer {
@@ -803,50 +818,87 @@ window.__ModuleLoader__.load({
       // The facts follow the DRAFT selection, because every catalog row carries
       // its own resolution: picking a shell shows what it would resolve to
       // before the save, which is the point of choosing here.
+      //
+      // Two of the five observation states are worth a line of their own: what
+      // the probe was measured doing under this deployment's sandbox. The others
+      // are answers about the probe itself, and the probe row says those.
       const observedKeys = {
         confirmed: 'observedConfirmed',
-        'runner-failed': 'observedRunnerFailed',
         'ran-unconfined': 'observedRanUnconfined',
-        'not-probed': 'observedNotProbed',
-        refused: 'observedNotProbed',
-        'not-run': 'observedNotProbed',
       }
+      // The facts are four different questions — where the shell is, what it
+      // answered, what the sandbox expects of it, and whether this mode may run
+      // it — so each is a labelled row and nothing is a bare sentence in a
+      // stack. A note sits under the row whose value it explains, which is where
+      // a measured reason belongs; a row never restates another row's verdict.
+      const observed = selected?.confinement?.observed
+      const probed = observed === 'confirmed' || observed === 'ran-unconfined' || observed === 'runner-failed'
+      const answered = selected?.version ?? selected?.interpreter
       const facts = []
       if (selected !== undefined) {
-        facts.push(h('span', { key: 'exe', className: selected.available === true ? undefined : 'dsss-factsError' },
-          selected.available === true
-            ? `${t('detected')}: ${selected.path}`
-            : `${t('notFound')}: ${selected.detail ?? ''}`))
-        if (selected.version !== undefined) {
-          facts.push(h('span', { key: 'ver' }, `${t('version')}: ${selected.version}`))
-        }
-        if (selected.interpreter !== undefined) {
-          facts.push(h('span', { key: 'interp' }, `${t('interpreter')}: ${selected.interpreter}`))
-        }
-        if (selected.versionError !== undefined) {
-          facts.push(h('span', { key: 'verr', className: 'dsss-factsError' }, selected.versionError))
-        }
-        // What the catalog expects, and what this machine was actually seen to
-        // do — two facts, never folded into one claim.
-        facts.push(h('span', { key: 'conf' }, selected.confineable ? t('confineable') : t('unconfineable')))
-        if (selected.confinement?.observed !== undefined) {
-          facts.push(h('span', { key: 'obs', className: 'dsss-factsQuiet' },
-            t(observedKeys[selected.confinement.observed] ?? 'observedNotProbed')))
-        }
+        facts.push({
+          key: 'exe',
+          label: t('detected'),
+          value: selected.available === true ? selected.path : t('notFound'),
+          tone: selected.available === true ? undefined : 'error',
+          notes: selected.available === true || selected.detail === undefined ? [] : [selected.detail],
+        })
+        facts.push({
+          key: 'probe',
+          label: selected.interpreter === undefined ? t('version') : t('interpreter'),
+          value: answered ?? t(probed ? 'notReported' : 'observedNotProbed'),
+          tone: answered === undefined ? 'quiet' : undefined,
+          // A refusal to probe is not a probe result: the Sandbox row below
+          // carries its reason, so repeating it here would say it twice.
+          notes: probed || observed === 'not-run'
+            ? [...selected.versionError === undefined ? [] : [selected.versionError]]
+            : [],
+        })
+        // What the catalog expects, what this machine was actually seen to do,
+        // and the measured reason when it says no — three facts, never folded
+        // into one claim, and never claimed as a measurement either.
+        const sandboxNotes = []
         if (selected.confineable === false && selected.confineReason !== undefined) {
-          facts.push(h('span', { key: 'why', className: 'dsss-factsQuiet' }, selected.confineReason))
+          sandboxNotes.push(selected.confineReason)
         }
-        facts.push(h('span', { key: 'mode' }, `${t('mode')}: ${status?.active?.mode ?? ''}`))
-        facts.push(h('span', {
-          key: 'usable',
-          className: selected.usableInMode === false ? 'dsss-factsError' : undefined,
-        }, selected.usableInMode === false ? t('blockedInMode') : t('usableInMode')))
+        if (observed === 'confirmed' || observed === 'ran-unconfined') {
+          sandboxNotes.push(t(observedKeys[observed]))
+        }
+        facts.push({
+          key: 'sandbox',
+          label: t('sandbox'),
+          value: selected.confineable ? t('confineable') : t('unconfineable'),
+          tone: selected.confineable ? undefined : 'error',
+          notes: sandboxNotes,
+        })
+        facts.push({
+          key: 'mode',
+          label: t('mode'),
+          value: status?.active?.mode ?? '',
+          tone: selected.usableInMode === false ? 'error' : undefined,
+          notes: [selected.usableInMode === false ? t('blockedInMode') : t('usableInMode')],
+        })
       } else if (autoUnknown) {
-        facts.push(h('span', { key: 'auto', className: 'dsss-factsQuiet' }, t('autoUnknownHint')))
+        facts.push({ key: 'auto', value: t('autoUnknownHint'), tone: 'quiet', notes: [] })
       } else if (status !== undefined && status.shells === undefined) {
-        facts.push(h('span', { key: 'none', className: 'dsss-factsError' },
-          `${t('statusFailed')}${status.error === undefined ? '' : `: ${status.error}`}`))
+        facts.push({
+          key: 'none',
+          value: `${t('statusFailed')}${status.error === undefined ? '' : `: ${status.error}`}`,
+          tone: 'error',
+          notes: [],
+        })
       }
+
+      /** One labelled row, with its notes under the value they explain. */
+      const factRow = fact => [
+        ...fact.label === undefined ? [] : [h('span', { key: `${fact.key}-l`, className: 'dsss-factLabel' }, fact.label)],
+        h('span', {
+          key: `${fact.key}-v`,
+          className: fact.tone === undefined ? 'dsss-factValue' : `dsss-factValue dsss-fact${fact.tone === 'error' ? 'Error' : 'Quiet'}`,
+        }, fact.value),
+        ...fact.notes.map((note, index) =>
+          h('span', { key: `${fact.key}-n${index}`, className: 'dsss-factNote' }, note)),
+      ]
 
       const textField = spec => {
         const name = spec.field
@@ -952,7 +1004,7 @@ window.__ModuleLoader__.load({
                   ),
                 }),
               ),
-              h('div', { className: 'dsss-facts' }, facts),
+              h('div', { className: 'dsss-facts' }, facts.flatMap(factRow)),
               // Said here rather than at the field: a cleared value may belong to
               // a field the newly selected shell does not even render, and an
               // explanation the user cannot see is no explanation.

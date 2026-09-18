@@ -218,7 +218,7 @@ function fakeScope(section = {}, base = {}) {
 const rows = {
   pwsh: { id: 'pwsh', label: 'PowerShell', dialect: 'powershell', available: true, path: 'C:/pwsh.exe', version: '7.4.1', confineable: true, confinement: { expected: 'confined', verified: true, observed: 'confirmed' }, usableInMode: true, supportsLoginShell: false, supportsDistro: false },
   cmd: { id: 'cmd', label: 'Command Prompt (cmd.exe)', dialect: 'cmd', available: true, path: 'C:/cmd.exe', confineable: true, confinement: { expected: 'confined', verified: true, observed: 'confirmed' }, usableInMode: true, supportsLoginShell: false, supportsDistro: false },
-  gitbash: { id: 'gitbash', label: 'Git Bash', dialect: 'bash', available: true, path: 'D:/Git/bin/bash.exe', version: '5.2.15', confineable: false, confineReason: 'measured reason', confinement: { expected: 'unconfined', verified: true, reason: 'measured reason', observed: 'not-probed' }, usableInMode: false, supportsLoginShell: true, supportsDistro: false },
+  gitbash: { id: 'gitbash', label: 'Git Bash', dialect: 'bash', available: true, path: 'D:/Git/bin/bash.exe', versionError: 'not probed: Git Bash cannot be confined under "workspace-write", and this plugin never runs a probe unconfined', confineable: false, confineReason: 'measured reason', confinement: { expected: 'unconfined', verified: true, reason: 'measured reason', observed: 'not-probed' }, usableInMode: false, supportsLoginShell: true, supportsDistro: false },
   wsl: { id: 'wsl', label: 'WSL Bash', dialect: 'wsl', available: false, detail: 'not found', confineable: false, confinement: { expected: 'unconfined', verified: true, observed: 'not-probed' }, usableInMode: false, supportsLoginShell: true, supportsDistro: true },
 }
 
@@ -324,12 +324,33 @@ async function mountCard(options = {}) {
     /** An option's rendered text, flattened. */
     optionText: id => {
       const item = elements(mounted.tree, 'Menu')[0]?.props.items.find(entry => entry.id === id)
-      return item === undefined ? undefined : texts(all(item.label)).join('')
+      return item === undefined ? undefined : texts(item.label).join('')
     },
     /** The option the dropdown reports as selected. */
     selectedOption: () => elements(mounted.tree, 'Menu')[0]?.props.selectedId,
     /** What the trigger reads. */
-    triggerText: () => texts(all(elements(mounted.tree, 'Menu')[0]?.props.anchor)).join(''),
+    triggerText: () => texts(elements(mounted.tree, 'Menu')[0]?.props.anchor).join(''),
+    /**
+     * The facts block, read as rows: the label column keys the value column, and
+     * each label also carries the notes rendered under its value.
+     * @returns the values by label, and the notes by label.
+     */
+    facts: () => {
+      const grid = elements(mounted.tree, 'div')
+        .find(node => String(node.props.className ?? '').includes('dsss-facts'))
+      const values = {}
+      const notes = {}
+      if (grid === undefined) return { values, notes }
+      let label = '?'
+      for (const cell of (grid.children ?? []).flatMap(child => Array.isArray(child) ? child : [child])) {
+        const className = String(cell?.props?.className ?? '')
+        const text = texts(cell).join('')
+        if (className.includes('dsss-factLabel')) { label = text; values[label] = ''; notes[label] = [] }
+        else if (className.includes('dsss-factValue')) values[label] = text
+        else if (className.includes('dsss-factNote')) notes[label].push(text)
+      }
+      return { values, notes }
+    },
     /** Choose an option the way the dropdown reports a click. */
     select: id => {
       const menu = elements(mounted.tree, 'Menu')[0]
@@ -469,7 +490,7 @@ describe('collapsible card', () => {
     assert.equal(card.selectedOption(), 'auto')
     // The trigger reads the shell's name, and Automatic says what it resolves to.
     assert.match(card.triggerText(), /Automatic/)
-    assert.match(texts(all(card.menu().props.items[0].label)).join(''), /resolves to PowerShell/)
+    assert.match(texts(card.menu().props.items[0].label).join(''), /resolves to PowerShell/)
   })
 })
 
@@ -883,11 +904,13 @@ describe('Automatic is a first-class selection', () => {
   it('shows Automatic\'s own facts, including what a call does with it', async () => {
     const card = await mountCard()
     card.toggle()
-    const text = card.text()
-    assert.ok(text.includes('C:/pwsh.exe'), 'the executable Automatic resolves to')
-    assert.ok(text.includes('7.4.1'), 'its version')
-    assert.ok(text.includes('sandbox: can be confined'), 'what the catalog expects')
-    assert.ok(text.includes('observed: it ran under the sandbox'), 'and what was observed')
+    const { values, notes } = card.facts()
+    assert.equal(values.Detected, 'C:/pwsh.exe', 'the executable Automatic resolves to')
+    assert.equal(values.Version, '7.4.1')
+    assert.equal(values.Sandbox, 'can be confined', 'what the catalog expects')
+    assert.deepEqual(notes.Sandbox, ['observed: it ran under the sandbox'], 'and what was observed')
+    assert.equal(values['Permission mode'], 'workspace-write')
+    assert.deepEqual(notes['Permission mode'], ['usable in the current permission mode'])
   })
 
   it('says an override is unresolved rather than naming a shell it would not run', async () => {
@@ -920,8 +943,78 @@ describe('Automatic is a first-class selection', () => {
       },
     })
     card.toggle()
-    assert.ok(card.text().includes('interpreter: dash'))
-    assert.ok(card.text().includes('confirmed') === false, 'a posix row is not reported as observed')
+    const { values, notes } = card.facts()
+    // The row is labelled for the answer it carries: this entry reports the
+    // interpreter its own `$0` names, not a version.
+    assert.equal(values.Interpreter, 'dash')
+    assert.equal(values.Version, undefined)
+    assert.ok(!card.text().includes('confirmed'), 'a posix row is not reported as observed')
+    assert.deepEqual(notes.Sandbox, [], 'and this machine did not probe it')
+  })
+})
+
+describe('the facts read as labelled rows', () => {
+  it('puts every fact under the label that names it', async () => {
+    const card = await mountCard()
+    card.toggle()
+    const { values, notes } = card.facts()
+    assert.deepEqual(Object.keys(values), ['Detected', 'Version', 'Sandbox', 'Permission mode'])
+    assert.equal(values.Detected, 'C:/pwsh.exe')
+    assert.equal(values.Sandbox, 'can be confined')
+    assert.deepEqual(notes.Sandbox, ['observed: it ran under the sandbox'])
+  })
+
+  it('says why a shell cannot be confined once, under the sandbox row', async () => {
+    // The reported mess: five lines that were one fact, with the reason repeated
+    // as a refusal-to-probe sentence. Git Bash cannot be confined here, so the
+    // row says so, the measured reason sits under it, and the probe row says
+    // only that it did not run — no line restates another.
+    const card = await mountCard({
+      section: { shell: 'gitbash' },
+      status: statusWithAuto(rows.pwsh),
+    })
+    card.toggle()
+    const { values, notes } = card.facts()
+    assert.equal(values.Detected, 'D:/Git/bin/bash.exe')
+    assert.equal(values.Version, 'not probed here')
+    assert.deepEqual(notes.Version, [], 'the reason belongs to the sandbox row, not here')
+    assert.equal(values.Sandbox, 'cannot be confined')
+    assert.deepEqual(notes.Sandbox, ['measured reason'])
+    assert.equal(values['Permission mode'], 'workspace-write')
+    assert.deepEqual(notes['Permission mode'], ['blocked by the current permission mode'])
+    assert.ok(!card.text().includes('cannot be confined under'), 'the refusal is not repeated as prose')
+  })
+
+  it('puts an unavailable shell\'s own diagnostic under its row', async () => {
+    const wslMissing = { ...rows.wsl, detail: 'no WSL Bash executable found in the execution environment' }
+    const card = await mountCard({
+      section: { shell: 'wsl' },
+      status: {
+        ...STATUS,
+        shells: [rows.pwsh, rows.cmd, rows.gitbash, wslMissing],
+        auto: { saved: { ...wslMissing, executable: '' }, withoutOverride: { ...wslMissing, executable: '' } },
+      },
+    })
+    card.toggle()
+    const { values, notes } = card.facts()
+    assert.equal(values.Detected, 'not found')
+    assert.deepEqual(notes.Detected, ['no WSL Bash executable found in the execution environment'])
+  })
+
+  it('reports a failed probe under the row whose value it explains', async () => {
+    const failing = { ...rows.cmd, versionError: 'exited with code 2: Illegal option --' }
+    const card = await mountCard({
+      status: {
+        ...STATUS,
+        shells: [failing],
+        auto: { saved: { ...failing, executable: '' }, withoutOverride: { ...failing, executable: '' } },
+      },
+    })
+    card.toggle()
+    const { values, notes } = card.facts()
+    assert.equal(values.Version, 'not reported', 'a probe that ran and failed is not a version')
+    assert.deepEqual(notes.Version, ['exited with code 2: Illegal option --'])
+    assert.deepEqual(notes.Sandbox, ['observed: it ran under the sandbox'], 'the run itself is still reported')
   })
 })
 
