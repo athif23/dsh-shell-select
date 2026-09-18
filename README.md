@@ -309,12 +309,18 @@ Opening it shows:
   found* rather than disappearing from the list. **Automatic**, the default, is
   the first option, says which shell the host resolves it to, and is always
   selectable — so a user who picked a specific shell can go back;
-- the selected shell's facts as **separate statements rather than one status
-  word**: detected path, version (or, for a shell with no version flag, the
-  interpreter its own `$0` names), what the catalog *expects* the sandbox to be
-  able to do, what this machine was *observed* doing, the permission mode in
-  force, and whether the shell is usable under that mode — plus the measured
-  refusal reason when it cannot be;
+- the selected shell's facts as a **labelled table rather than a stack of
+  sentences**, because they answer four different questions and a reader has to
+  be able to tell which is which: **Detected** (the path, or *not found* with its
+  diagnostic), **Version** — or **Interpreter**, for a shell whose entry reports
+  the implementation its own `$0` names — **Sandbox**, and **Permission mode**.
+  A reason sits under the row whose value it explains and is never repeated
+  elsewhere: the measured confinement reason under *Sandbox*, a probe's failure
+  or the workspace it could not run in under *Version*, the verdict under
+  *Permission mode*. What the catalog *expects* stays separate from what this
+  machine was *observed* doing — the observation is a note on the sandbox row,
+  and a shell that could not be probed says *not probed here* rather than
+  restating why;
 - the **executable path**, the **login-shell** toggle, and the WSL **distribution**
   and **mount root**, each shown only for the shells they apply to. The
   login-shell control also stays on screen whenever it holds a value that needs
@@ -545,7 +551,7 @@ entries — so a lane that stops being covered fails rather than going quiet.
 | `status.spec.mjs` | The separated status facts, Automatic resolved for its own configurations as distinct from the selected row, probes running confined or not at all, a non-zero probe exit as a failure, the `sh` interpreter probe, the test action's refusal path, and the loopback restriction |
 | `settings.spec.mjs` | Persistence across a fresh composition, unrelated edits surviving, a change applying only to later calls |
 | `replacement.spec.mjs` | The guard denying every replaced name and leaving unrelated tools alone |
-| `client.spec.mjs` | The card bundle and its interaction: the slot key, the injected stylesheet and the design tokens it uses, collapsed-by-default disclosure, staging on choose, one revision-fenced save, discard, launch options and overrides cleared on a shell change (and the note that says so), Automatic described by its own resolution rather than by the saved selection, an override the host has not resolved reported as unknown, an inherited value shadowed rather than unset, a test result and an in-flight test response dropped when the saved configuration moves, stale-status ordering, boolean-versus-string field values, and the validation that blocks a save the host would refuse while keeping the way out visible |
+| `client.spec.mjs` | The card bundle and its interaction: the slot key, the injected stylesheet and the design tokens it uses, collapsed-by-default disclosure, staging on choose, one revision-fenced save, discard, launch options and overrides cleared on a shell change (and the note that says so), Automatic described by its own resolution rather than by the saved selection, an override the host has not resolved reported as unknown, the facts read as labelled rows with each reason under the row it explains, an inherited value shadowed rather than unset, a test result and an in-flight test response dropped when the saved configuration moves, stale-status ordering, boolean-versus-string field values, and the validation that blocks a save the host would refuse while keeping the way out visible |
 
 ## Known limitations
 
