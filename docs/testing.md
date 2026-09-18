@@ -19,8 +19,11 @@ prerelease peer ranges to a newer line than this package pins.
 
 Test counts on the development host (Windows 10.0.26200, Node v24.15.0, DSH
 `0.1.6-alpha.1`): **249 tests, 248 passed, 1 skipped** (`pwsh` is not installed
-there). An independent review ran an earlier revision on Linux: **242 tests, 227
-passed, 0 failed, 15 skipped**; the counts differ because the suite has grown
+there). CI reports the same totals on Windows, and on the `ubuntu-latest` runner
+**249 tests, 234 passed, 0 failed, 15 skipped**, where the skips are the shells
+that image does not have (`zsh`, `fish`) and the Windows-lane cases. An
+independent review ran an earlier revision on Linux and reported 242 tests, 227
+passed, 0 failed, 15 skipped; the counts differ because the suite has grown
 since.
 
 ## Coverage by suite
@@ -76,23 +79,30 @@ writes are restricted; reads, network, and process visibility are not.
 
 ### Linux (secondary)
 
-An independent review ran the suite on Linux, and Bash, Zsh, and `sh` executed
-through the plugin there. That host had **no usable sandbox backend**, so those
-runs exercised the refusal path and the POSIX shell lanes rather than filesystem
-confinement: Linux confinement is not verified by them. Three such runs also
+Two Linux hosts have been used, and what each could verify differs.
+
+**The CI runner** (`ubuntu-latest`, Node 22.19 and 24) executes `bash`, `sh`,
+and `pwsh` through the plugin, and the confinement case asserts the file outcome
+there: under `workspace-write` a write inside the workspace succeeds while a
+write outside it is denied, and `read-only` denies the inside write too. Both
+hold. `zsh` and `fish` are not installed on that image, so their cases skip with
+that reason.
+
+**An independent review's host** ran the suites and executed `bash`, `zsh`, and
+`sh` through the plugin, but had no usable sandbox backend: there the refusal
+path was what got exercised, not filesystem confinement. Three runs on it also
 found host-dependent behavior in the suites themselves (Windows PATH parsing, a
 catalog comparison normalizing only one side, a working-directory existence case
 handed a POSIX path under a simulated Windows platform), all fixed and pinned by
 cases that pass on either platform.
 
-The test workflow runs on Linux too, and what it can verify there is narrower
-than the Windows lane, because the two profiles grant different roots. The Linux
-`workspace-write` profile grants `/tmp` writable, so a fixture under `/tmp`
-cannot test that a write outside the workspace is denied: the write succeeds
-because the location is granted. CI therefore names a scratch root outside both
-the profile and `/tmp` (`/var/tmp/dsh-shell-select`), the suite refuses to assert the
-denial from a `/tmp` fixture and says which variable to set instead, and Windows
-is where the file outcome has actually been measured.
+Where the fixture lives decides whether the denial can be asserted at all. The
+Linux `workspace-write` profile grants `/tmp` writable, so a fixture under `/tmp`
+cannot test a write outside the workspace: the write succeeds because the
+location is granted. CI names a scratch root outside both the profile and `/tmp`
+(`/var/tmp/dsh-shell-select`), and the suite reports the location as the problem,
+naming the variable to set, rather than failing when the fixture sits under a
+granted root.
 
 POSIX shell semantics were measured directly under WSL Ubuntu 22.04 rather than
 through the plugin: `dash` answers `--version` with an illegal-option error on

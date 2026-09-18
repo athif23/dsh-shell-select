@@ -77,13 +77,13 @@ dependencies rather than carrying a second copy of them.
 | Platform | Catalog entries | Executed through the plugin | Confinement verified |
 |---|---|---|---|
 | Windows (primary) | `pwsh`, `powershell`, `cmd`, `gitbash`, `wsl` | PowerShell 5.1, `cmd.exe`, Git Bash, WSL Bash | `cmd.exe` and PowerShell 5.1, yes. Git Bash and WSL Bash, no |
-| Linux (secondary) | `bash`, `zsh`, `fish`, `sh`, `pwsh` | `bash`, `zsh`, and `sh`, by an independent review | no |
+| Linux (secondary) | `bash`, `zsh`, `fish`, `sh`, `pwsh` | `bash`, `sh`, and `pwsh` on the CI runner; `bash`, `zsh`, and `sh` by an independent review | yes, for `bash` on the CI runner |
 | macOS (unverified) | `bash`, `zsh`, `fish`, `sh`, `pwsh` | none | no |
 
 "Catalog entries" means the plugin can select the shell and build its arguments.
 "Executed through the plugin" means someone ran agent commands with it. The last
 column is stricter than both: it means a write outside the workspace was actually
-denied.
+denied, which the suite asserts wherever the runner's profile promises it.
 
 **Windows is the primary platform.** There, Git Bash and WSL Bash cannot start
 under the restricted token the sandbox uses, so they are refused under
@@ -93,11 +93,12 @@ alternative would be running a shell the sandbox cannot confine. `pwsh`
 (PowerShell 7) is supported and was skipped on the test host only because it is
 not installed there.
 
-**Linux is secondary.** An independent review ran the suites on Linux and
-executed `bash`, `zsh`, and `sh` through the plugin, but that host had no usable
-sandbox backend, so Linux confinement is not verified. **macOS is unverified.**
-The test workflow runs the suite on Windows and Linux only; check its latest run
-rather than trusting a claim here.
+**Linux is secondary.** The CI runner executes `bash`, `sh`, and `pwsh` through
+the plugin and asserts the workspace-write denial, which holds there. An
+independent review ran the suites on a Linux host with no usable sandbox backend,
+so on that machine the refusal path was what got exercised. `zsh` and `fish` were
+installed on neither. **macOS is unverified.** The test workflow runs on Windows
+and Linux only; check its latest run rather than trusting a claim here.
 
 Measurements, exceptions, and what remains untested are in
 [testing.md](docs/testing.md). The routing rules and execution detail are in
