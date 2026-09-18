@@ -20,7 +20,7 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, realpathSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
@@ -30,7 +30,7 @@ import { ShellSelectConfig, ShellSelectExecutor } from '../src/executor.js'
 import { catalogFor, findEntry } from '../src/catalog.js'
 import { toLinuxPath } from '../src/dialects.js'
 import { laneFor } from './lanes.mjs'
-import { makeFixture, removeFixture, StubSandboxPolicy } from './helpers.mjs'
+import { TEST_TMP_ENV, makeFixture, removeFixture, StubSandboxPolicy } from './helpers.mjs'
 
 const fixture = makeFixture('integration')
 const workspace = join(fixture, 'ws space ünï')
@@ -142,6 +142,23 @@ async function available(shell, id) {
 /** Whether the catalog refuses to confine an entry on this platform. */
 function cannotConfine(id) {
   return findEntry(HOST_PLATFORM, id)?.confineable?.confined === false
+}
+
+/**
+ * Whether the escape probe writes outside everything the mode grants.
+ *
+ * `workspace-write` grants the workspace, and on POSIX it grants `/tmp` as well:
+ * the Linux runner chain's profiles list it writable, and bubblewrap mounts a
+ * private one there. An escape directory inside a granted root cannot test a
+ * denial, because the write succeeds for a reason that has nothing to do with
+ * the plugin: it is a fact about where the fixture lives. The scratch root is
+ * the operator's choice, so the skip message asks for a different one.
+ * @returns true when the escape directory is outside every granted root.
+ */
+function escapeOutsideGrants() {
+  if (HOST_PLATFORM !== 'posix') return true
+  const real = realpathSync(escapeDir)
+  return !['/tmp', '/private/tmp'].some(root => real === root || real.startsWith(`${root}/`))
 }
 
 /**
@@ -325,13 +342,11 @@ describe(`${HOST_PLATFORM} lane: confinement`, () => {
         if (HOST_PLATFORM === 'windows') assert.equal(result.sandbox.enforcement, 'partial')
         return
       }
-      if (HOST_PLATFORM !== 'windows' && result.sandbox.enforcement !== 'full') {
-        // The runner this host selected does not promise to govern every file
-        // effect: the Linux chain falls back to its Landlock launcher when the
-        // bubblewrap probe fails, and the launcher reports partial enforcement
-        // for exactly that reason. An escape write is then a fact about the
-        // runner, not about the plugin, so it is reported rather than asserted.
-        t.skip(`this host's ${result.sandbox.enforcement}-enforcement runner did not deny an escape write`)
+      if (!escapeOutsideGrants()) {
+        // The fixture sits inside a root this mode grants, so the write landing
+        // there is what the grant allows and says nothing about the plugin.
+        t.skip(`this run's scratch root is under /tmp, which the POSIX workspace-write profile grants writable; `
+          + `name one outside it (${TEST_TMP_ENV}) to assert the denial`)
         return
       }
       assert.fail(`the escape write must be denied (${measurement})`)

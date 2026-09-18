@@ -86,13 +86,13 @@ handed a POSIX path under a simulated Windows platform), all fixed and pinned by
 cases that pass on either platform.
 
 The test workflow runs on Linux too, and what it can verify there is narrower
-than the Windows lane. On the runner used, the harness selects a backend that
-reports less than full enforcement, and a write outside the workspace is not
-denied. The integration suite reports that measurement and skips its denial
-assertion on such a host, while still asserting that the command went through
-`ctx.sandbox.confine` under the confining mode: an escape write there is a fact
-about the selected runner, not about the plugin, and a run that bypassed the
-sandbox would still fail. Windows is where the file outcome is asserted.
+than the Windows lane, because the two profiles grant different roots. The Linux
+`workspace-write` profile grants `/tmp` writable, so a fixture under `/tmp`
+cannot test that a write outside the workspace is denied: the write succeeds
+because the location is granted. CI therefore names a scratch root outside both
+the profile and `/tmp` (`/mnt/dsh-shell-select`), the suite refuses to assert the
+denial from a `/tmp` fixture and says which variable to set instead, and Windows
+is where the file outcome has actually been measured.
 
 POSIX shell semantics were measured directly under WSL Ubuntu 22.04 rather than
 through the plugin: `dash` answers `--version` with an illegal-option error on

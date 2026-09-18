@@ -25,10 +25,12 @@ on:
 # Every GitHub runner checks the repository out inside the runner user's home
 # directory, and no fixture may be created under a user profile. The suites
 # refuse a profile-contained fixture root and say how to approve one, so the test
-# step names a scratch directory outside the profile: `/tmp` on the POSIX
-# runner, and the runner's own temp volume on Windows (`D:\a\_temp`, not
-# `C:\Users\...`). The setting lives on the step because `runner.*` is not
-# available to workflow-level or job-level `env`.
+# step names a scratch directory outside the profile, and outside `/tmp` on
+# Linux: the POSIX workspace-write profile grants `/tmp` writable, so a fixture
+# there cannot test that a write outside the workspace is denied. On Windows the
+# runner's own temp volume is the right place (`D:\a\_temp`, not `C:\Users\...`),
+# and the Windows ACL profile grants only the workspace. The setting lives on the
+# step because `runner.*` is not available to workflow-level or job-level `env`.
 jobs:
   test:
     strategy:
@@ -49,5 +51,5 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Test
         env:
-          DSH_SHELL_SELECT_TEST_TMP: ${{ runner.os == 'Windows' && format('{0}/dsh-shell-select', runner.temp) || '/tmp/dsh-shell-select' }}
+          DSH_SHELL_SELECT_TEST_TMP: ${{ runner.os == 'Windows' && format('{0}/dsh-shell-select', runner.temp) || '/mnt/dsh-shell-select' }}
         run: pnpm test
