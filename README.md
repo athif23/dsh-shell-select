@@ -80,16 +80,17 @@ guarantee, and this plugin adds no destructive-command detection.
 Stated plainly, because a compatibility claim you cannot check is worse than no
 claim. Every number below is from a run of `pnpm test` in this repository.
 
-**On Windows 10.0.26200, against DSH `0.1.6-alpha.1`:** 224 tests, 223 passing, 1
+**On Windows 10.0.26200, against DSH `0.1.6-alpha.1`:** 226 tests, 225 passing, 1
 skipped (`pwsh` is not installed here).
 
 **On Linux (Ubuntu) and macOS:** the suites are written to run on either platform
-and CI runs them on `ubuntu-latest` and `macos-latest`. The last independent Linux
-run, by a reviewer, executed Bash, Zsh, and `sh` through the plugin and reported
-that host has no usable sandbox backend — so it verified the refusal path rather
-than filesystem confinement. That run found host-dependent test boundaries, all
-of which are fixed here; the fixes are asserted by cases that pass on either
-platform, and CI is what confirms them.
+and CI runs them on `ubuntu-latest` and `macos-latest`. Two independent Linux runs
+by a reviewer executed Bash, Zsh, and `sh` through the plugin; that host has no
+usable sandbox backend, so they verified the refusal path rather than filesystem
+confinement. Both runs found host-dependent behavior — test boundaries, Windows
+PATH parsing, a fixture-root check that could not fail, and a Test action that
+ran in the host process's directory — all fixed here and pinned by cases that
+pass on either platform. CI is what confirms them.
 
 - Every catalog entry's argv, end to end, for `cmd`, Windows PowerShell 5.1, Git
   Bash, and WSL (Ubuntu 22.04) through the real subprocess and sandbox providers.
@@ -314,11 +315,14 @@ resolve to before committing to it. **Test shell** runs the *saved* selection �
 a module constant (`echo DSH-SHELL-SELECT-TEST-OK`) with no input, through the
 same decide/run path a model call takes, so it reports the same refusal a model
 call would get and never demonstrates a capability the tool itself would not
-grant. A result — on screen or still in flight — is dropped, with a note, as soon
+grant. The test runs in the deployment's workspace root — the directory the sandbox
+grants, not wherever the host process happens to sit. A result — on screen or still
+in flight — is dropped, with a note, as soon
 as the saved configuration changes under it: the shell, the executable, the login
 flag, the distribution, or the mount root, whether the change came from this card,
 another window, or a hand-edited document. A result for a selection the host is no
-longer running would be worse than no result.
+longer running would be worse than no result — and the run is released with it, so
+a discarded test never leaves the button saying *Testing…*.
 
 Version probes are the one place the card runs something, and they run the same
 way a command does: fixed plugin-owned arguments, through `ctx.sandbox.confine`
@@ -435,7 +439,7 @@ nothing this plugin exercises needs those scripts to run. The prebuilt binaries
 those packages ship are what the real subprocess and sandbox providers use, and
 the integration lane proves they work.
 
-224 tests across twelve suites. Everything disposable lives under an approved
+226 tests across twelve suites. Everything disposable lives under an approved
 scratch root: `<projectRoot>/.test-tmp/<unique-id>/` by default, or
 `DSH_SHELL_SELECT_TEST_TMP` when this checkout has no scratch of its own outside
 the user profile. `test/helpers.mjs` validates the root before creating anything

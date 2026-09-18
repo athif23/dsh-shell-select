@@ -16,7 +16,7 @@
 
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, parse, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, join, parse, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { SubprocessExecutableNotFoundError } from '@deepseek-ai/dsh-subprocess'
@@ -131,7 +131,10 @@ export function testTmpRoot() {
   if (configured === undefined || configured.length === 0) {
     return assertApprovedFixtureRoot(join(projectRoot(), '.test-tmp'))
   }
-  if (!resolve(configured).startsWith(sep) && !/^[A-Za-z]:[\\/]/u.test(configured)) {
+  // Checked on the value as given: `resolve()` turns any relative path into an
+  // absolute one, so a check on the resolved form could never reject a relative
+  // root — it would silently read the paths as relative to this process's cwd.
+  if (!isAbsolute(configured)) {
     throw new Error(`test helpers: ${TEST_TMP_ENV} must be an absolute path, got ${JSON.stringify(configured)}`)
   }
   return assertApprovedFixtureRoot(configured)

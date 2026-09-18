@@ -198,7 +198,11 @@ function probeSignal() {
  * through the executor's normal decide/run path, which means it reports the same
  * refusal a model call would get when the shell cannot be confined — the test
  * never demonstrates a capability the tool itself would not grant.
- * @param ctx - context carrying the shell executor.
+ *
+ * It runs in the deployment's workspace root, the directory the sandbox grants,
+ * rather than wherever the host process happens to sit: the same directory the
+ * version probes use, and the one this action is meaningful in.
+ * @param ctx - context carrying the shell executor and the resolved policy.
  * @param executor - the mounted shell-select executor.
  * @returns the test outcome, including the resolved mode and sandbox facts.
  */
@@ -206,6 +210,7 @@ export async function runShellTest(ctx, executor) {
   try {
     const decided = await executor.decide(executor.resolve({
       command: testCommand(),
+      workdir: ctx.sandboxPolicy.resolve().workspaceRoot,
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
     }))
     const result = await executor.run(decided.spec)

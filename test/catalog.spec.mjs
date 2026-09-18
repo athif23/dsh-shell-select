@@ -122,6 +122,21 @@ describe('the catalog names shells, not paths', () => {
     assert.match(refused.detail, /expected bash\.exe/u)
   })
 
+  it('parses a Windows PATH with Windows separators, on any host', () => {
+    // The colon in `D:\Git\cmd` is a drive letter, not a separator. Splitting on
+    // `:` — which is what a POSIX host's own platform suggests — shreds the entry
+    // and loses the Git install root, so the catalog would report no Git Bash on a
+    // machine that has one.
+    const candidates = findEntry('windows', 'gitbash').candidates(WINDOWS_ENV)
+    assert.ok(
+      candidates.includes('D:\\Git\\bin\\bash.exe'),
+      `the Git root from PATH is missing: ${candidates.join(', ')}`,
+    )
+    for (const candidate of candidates) {
+      assert.ok(!candidate.includes(';'), `a PATH entry was not split: ${candidate}`)
+    }
+  })
+
   it('writes Windows paths in Windows form, whatever host asks for them', () => {
     // The catalog for a platform must not vary by host: `node:path.join` would
     // produce `D:\Git/bin/bash.exe` on a POSIX host, which is neither a Windows

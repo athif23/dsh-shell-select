@@ -78,12 +78,18 @@ function envValue(env, name) {
 }
 
 /**
- * PATH entries, quotes stripped, empties removed.
+ * Windows PATH entries, quotes stripped, empties removed.
+ *
+ * The separator is Windows' own, unconditionally: this parses the environment of
+ * a *Windows* execution world, whose PATH is `;`-separated whether the code
+ * asking happens to run on Windows, Linux, or macOS. Choosing the separator by
+ * `process.platform` would split `D:\Git\cmd;C:\Program Files\Git\mingw64\bin` on
+ * every colon — including the one after the drive letter — on a POSIX host.
  * @param env - environment to read.
  * @returns the entries in PATH order.
  */
 function pathEntries(env) {
-  return (envValue(env, 'PATH') ?? '').split(process.platform === 'win32' ? ';' : ':')
+  return (envValue(env, 'PATH') ?? '').split(';')
     .map(entry => entry.trim().replace(/^"|"$/gu, ''))
     .filter(entry => entry.length > 0)
 }

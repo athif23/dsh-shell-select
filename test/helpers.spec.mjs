@@ -77,10 +77,10 @@ describe('fixtures stay out of the user profile', () => {
   })
 
   it('uses an approved root outside the profile when one is named', () => {
-    // Approved here means this project's own scratch directory: inside the
-    // workspace, outside the profile. The point is that the variable is honored
-    // and the result is validated, not that a test scribbles elsewhere.
-    const approved = join(projectRoot(), '.test-tmp', 'approved-root')
+    // Derived from the root this run is actually using: when the checkout is
+    // inside the profile, that root is the external one CI approved, and a case
+    // built inside the project would fail for the reason it is checking.
+    const approved = join(testTmpRoot(), 'approved-root')
     const root = withTestTmpRoot(approved, () => testTmpRoot())
     assert.equal(root, approved)
     rmSync(approved, { recursive: true, force: true })

@@ -693,6 +693,37 @@ describe('the host reads stay current', () => {
     assert.ok(!card.text().includes('exit 0'), 'a response for the previous selection is discarded')
   })
 
+  it('lets another test start after a save discarded the one in flight', async () => {
+    // The reported dead end: the in-flight response is invalidated and returns
+    // early without clearing the spinner, so the button said "Testing…" forever.
+    const card = await mountCard()
+    card.toggle()
+    const held = []
+    globalThis.fetch = (url, options) => (options?.method === 'POST'
+      ? new Promise(resolve => { held.push(resolve) })
+      : Promise.resolve({ ok: true, json: async () => STATUS }))
+    const first = card.props.testShell()
+    card.select('gitbash')
+    card.save()
+    await card.settle()
+    held[0]({ ok: true, json: async () => ({ ok: true, stage: 'ran', shell: 'cmd', exitCode: 0, stdout: 'OK' }) })
+    await first
+    assert.equal(card.snapshot().testing, false, 'the discarded run stops reporting itself as running')
+    card.toggle()
+    assert.equal(card.buttons('dsss-tool')[0].props.disabled, false, 'and the button can be pressed again')
+    assert.ok(!card.text().includes('Testing'), 'the label is back to its resting state')
+
+    globalThis.fetch = async (url, options) => ({
+      ok: true,
+      json: async () => (options?.method === 'POST'
+        ? { ok: true, stage: 'ran', shell: 'gitbash', exitCode: 0, stdout: 'OK' }
+        : STATUS),
+    })
+    await card.props.testShell()
+    assert.equal(card.snapshot().testing, false)
+    assert.ok(card.text().includes('gitbash'), 'the second run reports its own result')
+  })
+
   it('drops a result when the document changes from elsewhere', async () => {
     const card = await mountCard()
     card.toggle()

@@ -280,12 +280,15 @@ describe('status payload', () => {
 
 describe('test action', () => {
   it('runs the fixed command through the configured shell', async () => {
-    const { ctx, shell, sandbox } = await mount({ shell: 'cmd' })
+    const { ctx, shell, sandbox, subprocess, policyRoot } = await mount({ shell: 'cmd' })
     const result = await runShellTest(ctx, shell)
     assert.equal(result.ok, true)
     assert.equal(result.stage, 'ran')
     assert.equal(result.shell, 'cmd')
     assert.equal(result.mode, 'workspace-write')
+    // In the deployment's workspace root, the directory the sandbox grants, not
+    // wherever the host process happens to sit.
+    assert.equal(subprocess.spawns[0].cwd, policyRoot)
     assert.equal(result.sandbox.enforcement, 'partial')
     assert.equal(sandbox.calls.length, 1, 'the test must go through confinement, not around it')
   })

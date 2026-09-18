@@ -21,12 +21,11 @@ on:
 
 # Every GitHub runner checks the repository out inside the runner user's home
 # directory, and no fixture may be created under a user profile. The suites
-# refuse a profile-contained fixture root and say how to approve one, so CI names
-# a scratch directory outside the profile: `/tmp` on the POSIX runners, and the
-# runner's own temp volume on Windows (`D:\a\_temp`, not `C:\Users\...`).
-env:
-  DSH_SHELL_SELECT_TEST_TMP: ${{ runner.os == 'Windows' && format('{0}/dsh-shell-select', runner.temp) || '/tmp/dsh-shell-select' }}
-
+# refuse a profile-contained fixture root and say how to approve one, so the test
+# step names a scratch directory outside the profile: `/tmp` on the POSIX
+# runners, and the runner's own temp volume on Windows (`D:\a\_temp`, not
+# `C:\Users\...`). The setting lives on the step because `runner.*` is not
+# available to workflow-level or job-level `env`.
 jobs:
   test:
     strategy:
@@ -45,4 +44,7 @@ jobs:
       # The lockfile is committed, so the CI graph is the reviewed one rather
       # than whatever the ranges resolve to that day.
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test
+      - name: Test
+        env:
+          DSH_SHELL_SELECT_TEST_TMP: ${{ runner.os == 'Windows' && format('{0}/dsh-shell-select', runner.temp) || '/tmp/dsh-shell-select' }}
+        run: pnpm test

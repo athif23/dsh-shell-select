@@ -522,9 +522,10 @@ window.__ModuleLoader__.load({
         const draft = current.dirty ? current.draft : stored
         const failures = planFailures(draft, current.status)
         // A pending or displayed test result belongs to the configuration it was
-        // started against. When the saved configuration moves under it, the
-        // result is dropped and any response still in flight is invalidated, so a
-        // slow answer cannot land under a selection it never ran.
+        // started against. When the saved configuration moves under it, the result
+        // is dropped, any response still in flight is invalidated — and the
+        // spinner goes with them, because that response returns early without
+        // clearing it and a stuck button is a button the user cannot press again.
         const stale = current.testSignature !== undefined && current.testSignature !== savedSignature(stored)
         if (stale) this.testGeneration += 1
         this.store.set({
@@ -536,7 +537,7 @@ window.__ModuleLoader__.load({
           draft,
           failures,
           dirty: saveOps(draft, stored).length > 0,
-          ...stale ? { test: undefined, testSignature: undefined, testCleared: true } : {},
+          ...stale ? { test: undefined, testSignature: undefined, testCleared: true, testing: false } : {},
         })
       }
 
