@@ -8,6 +8,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { win32 } from 'node:path'
 import { describe, it } from 'node:test'
 import { candidatePwshPaths } from '@deepseek-ai/dsh-pwsh-local'
 import {
@@ -98,13 +99,16 @@ describe('the catalog names shells, not paths', () => {
     assert.ok(withEnv.includes('wsl.exe'))
 
     // With an empty environment, every absolute candidate that survives must be
-    // one the HARNESS contributes: this plugin invents none of its own.
-    const harnessKnown = new Set(candidatePwshPaths({}).map(candidate => candidate.toLowerCase()))
+    // one the HARNESS contributes: this plugin invents none of its own. Both
+    // sides are normalized the same way, because the harness builds its list with
+    // `node:path.join` — on a POSIX host that arrives as `C:\Program Files/...`,
+    // which is neither a Windows path nor a POSIX one.
+    const harnessKnown = new Set(candidatePwshPaths({}).map(candidate => win32.normalize(candidate).toLowerCase()))
     for (const entry of catalogFor('windows')) {
       for (const candidate of entry.candidates({})) {
         if (!/^[A-Za-z]:/u.test(candidate)) continue
         assert.ok(
-          harnessKnown.has(candidate.toLowerCase()),
+          harnessKnown.has(win32.normalize(candidate).toLowerCase()),
           `${entry.id} invents an absolute path the harness does not name: ${candidate}`,
         )
       }
