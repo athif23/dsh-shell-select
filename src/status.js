@@ -29,7 +29,7 @@
 import { catalogFor, probeFor } from './catalog.js'
 import { versionArgv, testCommand } from './dialects.js'
 import { VERIFIED_CONFINEMENT_PLATFORMS } from './catalog.js'
-import { ShellSelectionRefusedError } from './executor.js'
+import { ShellSelectionRefusedError, settingsSnapshot } from './executor.js'
 
 /** Route prefix both endpoints live under. */
 export const STATUS_ROUTE_PREFIX = '/dsh-shell-select'
@@ -136,39 +136,114 @@ async function probeRow(executor, entry, row, policy, signal) {
 }
 
 /**
+ * Complete one row: whether the current mode allows it, what confinement was
+ * expected, and what this machine was observed doing with it.
+ *
+ * Shared by the catalog rows and by Automatic's own resolution, so the facts a
+ * user reads for "Automatic" come from the same code as the facts for a shell
+ * they picked by name.
+ * @param executor - the mounted shell-select executor.
+ * @param entries - catalog entries by id, each owning its probe query.
+ * @param row - the row to complete.
+ * @param policy - the resolved sandbox policy.
+ * @param platformVerified - whether this platform's confinement claims were measured here.
+ * @returns the row with its usability, confinement, and probe facts.
+ */
+async function rowFacts(executor, entries, row, policy, platformVerified) {
+  // Facts the card must not conflate: whether the binary runs at all, whether
+  // the catalog expects the sandbox to be able to confine it, and whether this
+  // machine was observed doing so. `usableInMode` answers only the second
+  // combined with availability, so it stays a statement of expectation.
+  const usableInMode = row.available === true
+    && (row.confineable || policy.mode === 'danger-full-access')
+  const confinement = {
+    // The catalog's claim for this platform, and whether that claim was
+    // measured here rather than reasoned about.
+    expected: row.confineable ? 'confined' : 'unconfined',
+    verified: platformVerified,
+    ...row.confineReason === undefined ? {} : { reason: row.confineReason },
+  }
+  if (row.available !== true) {
+    return { ...row, usableInMode, confinement: { ...confinement, observed: 'not-probed' } }
+  }
+  const probe = await probeRow(executor, entries.get(row.id), row, policy, probeSignal())
+  return { ...row, ...probe, usableInMode, confinement: { ...confinement, observed: probe.observed } }
+}
+
+/**
+ * The row Automatic resolves to for one configuration.
+ *
+ * `auto` has no catalog row of its own, so its row is assembled from the
+ * resolution the executor performs for it and completed the same way a catalog
+ * row is. The executable override is a parameter rather than a read of the
+ * settings, because the configurations a card can be describing differ exactly
+ * there: what a shell switch leaves staged is the saved configuration with the
+ * override removed.
+ * @param executor - the mounted shell-select executor.
+ * @param entries - catalog entries by id, each owning its probe query.
+ * @param policy - the resolved sandbox policy.
+ * @param platformVerified - whether this platform's confinement claims were measured here.
+ * @param settings - the settings snapshot the resolution answers for.
+ * @param executable - the executable override to resolve under; `''` for none.
+ * @returns the resolved row, tagged with the override it was resolved under, or
+ *   the diagnostic for a machine where nothing resolves.
+ */
+async function automaticRow(executor, entries, policy, platformVerified, settings, executable) {
+  const resolution = await executor.resolveAuto({ settings, executable })
+  const entry = resolution.entry
+  if (entry === undefined) {
+    return { executable, available: false, detail: resolution.detail }
+  }
+  const capability = entry.confineable ?? { confined: true }
+  return {
+    executable,
+    ...await rowFacts(executor, entries, {
+      id: entry.id,
+      label: entry.label,
+      dialect: entry.dialect,
+      available: resolution.available === true,
+      ...resolution.available === true
+        ? { path: resolution.path, source: resolution.source }
+        : { detail: resolution.detail },
+      confineable: capability.confined,
+      ...capability.confined ? {} : { confineReason: capability.reason },
+      supportsLoginShell: entry.supportsLoginShell === true,
+      supportsDistro: entry.supportsDistro === true,
+      syntax: entry.syntax,
+    }, policy, platformVerified),
+  }
+}
+
+/**
  * Assemble the card's status payload.
  * @param ctx - context carrying subprocess, sandbox policy, and the executor.
  * @param executor - the mounted shell-select executor.
- * @returns the selected shell, the resolved mode, and one row per catalog entry.
+ * @returns the selected shell, Automatic's own resolution, the resolved mode,
+ *   and one row per catalog entry.
  */
 export async function buildStatus(ctx, executor) {
   const platform = await executor.executionPlatformNow()
   const policy = ctx.sandboxPolicy.resolve()
+  const settings = settingsSnapshot(executor.selectSettings)
   const rows = await executor.describeCatalog()
   const entries = new Map(catalogFor(platform).map(entry => [entry.id, entry]))
   const platformVerified = VERIFIED_CONFINEMENT_PLATFORMS.includes(platform)
   // Probes run in parallel: each is an independent short-lived process, and the
   // card is opened on demand rather than in any hot path.
-  const probed = await Promise.all(rows.map(async row => {
-    // Facts the card must not conflate: whether the binary runs at all, whether
-    // the catalog expects the sandbox to be able to confine it, and whether this
-    // machine was observed doing so. `usableInMode` answers only the second
-    // combined with availability, so it stays a statement of expectation.
-    const usableInMode = row.available === true
-      && (row.confineable || policy.mode === 'danger-full-access')
-    const confinement = {
-      // The catalog's claim for this platform, and whether that claim was
-      // measured here rather than reasoned about.
-      expected: row.confineable ? 'confined' : 'unconfined',
-      verified: platformVerified,
-      ...row.confineReason === undefined ? {} : { reason: row.confineReason },
-    }
-    if (row.available !== true) {
-      return { ...row, usableInMode, confinement: { ...confinement, observed: 'not-probed' } }
-    }
-    const probe = await probeRow(executor, entries.get(row.id), row, policy, probeSignal())
-    return { ...row, ...probe, usableInMode, confinement: { ...confinement, observed: probe.observed } }
-  }))
+  const probed = await Promise.all(rows.map(async row =>
+    rowFacts(executor, entries, row, policy, platformVerified)))
+  // `auto` is resolved for itself rather than read off the selected row: the
+  // settings may select a shell `auto` would never choose. Two configurations
+  // are resolved because a card can be describing either — the one the settings
+  // hold, and the one a shell switch leaves staged, which is the saved
+  // configuration with the executable override removed, since clearing that
+  // override is what a save then stores.
+  const saved = await automaticRow(
+    executor, entries, policy, platformVerified, settings, settings.executable ?? '',
+  )
+  const withoutOverride = settings.executable === undefined
+    ? saved
+    : await automaticRow(executor, entries, policy, platformVerified, settings, '')
   return {
     active: {
       shell: executor.selectSettings.shell,
@@ -179,6 +254,7 @@ export async function buildStatus(ctx, executor) {
       mode: policy.mode,
       workspaceRoot: policy.workspaceRoot,
     },
+    auto: { saved, withoutOverride },
     // A platform-level statement: whether *any* confinement claim here was
     // measured by this plugin. Per-shell observation rides on each row.
     confinementVerified: platformVerified,

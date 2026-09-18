@@ -107,6 +107,49 @@ describe('status payload', () => {
     assert.equal(status.shells.find(row => row.id === 'pwsh').selected, true)
   })
 
+  it('reports what auto resolves to, beside what the settings select', async () => {
+    // The card describes Automatic from this, and the two are different
+    // questions: here the settings select Git Bash while Automatic — the catalog
+    // order, nothing preferred — resolves to PowerShell.
+    const { ctx, shell } = await mount({ shell: 'gitbash' })
+    const status = await buildStatus(ctx, shell)
+    assert.equal(status.active.selected, 'gitbash')
+    assert.equal(status.auto.saved.id, 'pwsh')
+    assert.equal(status.auto.saved.executable, '', 'the saved configuration carries no override')
+    assert.equal(status.auto.saved.available, true)
+    assert.equal(status.auto.saved.path, 'C:\\Program Files\\PowerShell\\7\\pwsh.exe')
+  })
+
+  it('resolves auto for the override it is asked about', async () => {
+    // An override naming a shell claims that shell under auto, so Automatic runs
+    // Git Bash here — and dropping the override moves it back to the catalog's
+    // own answer, which is the configuration a shell switch leaves staged.
+    const { ctx, shell } = await mount({ shell: 'auto', executable: 'D:\\Git\\bin\\bash.exe' })
+    const status = await buildStatus(ctx, shell)
+    assert.equal(status.auto.saved.executable, 'D:\\Git\\bin\\bash.exe')
+    assert.equal(status.auto.saved.id, 'gitbash', 'the override names its own shell')
+    assert.equal(status.auto.saved.path, 'D:\\Git\\bin\\bash.exe')
+    assert.equal(status.auto.withoutOverride.executable, '')
+    assert.equal(status.auto.withoutOverride.id, 'pwsh', 'and without it, the catalog decides')
+  })
+
+  it('reports one resolution twice when the saved configuration carries no override', async () => {
+    // Nothing distinguishes the two configurations here, so the payload does not
+    // resolve the same question twice.
+    const { ctx, shell } = await mount({ shell: 'cmd' })
+    const status = await buildStatus(ctx, shell)
+    assert.equal(status.auto.saved, status.auto.withoutOverride)
+  })
+
+  it('reports Automatic as unresolved when the machine has no shell it knows', async () => {
+    const { ctx, shell } = await mount({ shell: 'auto' }, { resolvable: {} })
+    const status = await buildStatus(ctx, shell)
+    assert.equal(status.auto.saved.id, undefined)
+    assert.equal(status.auto.saved.available, false)
+    assert.match(status.auto.saved.detail, /no shell in the windows catalog resolved/u)
+    assert.equal(status.active.selected, undefined, 'and nothing is selected either')
+  })
+
   it('keeps "installed" and "usable in this mode" as separate facts', async () => {
     const { ctx, shell } = await mount({ shell: 'cmd' })
     const status = await buildStatus(ctx, shell)
@@ -147,9 +190,12 @@ describe('status payload', () => {
     const status = await buildStatus(ctx, shell)
     assert.equal(status.shells.find(row => row.id === 'cmd').version, 'Microsoft Windows [Version 10]')
     const probed = status.shells.filter(row => row.available === true)
-    // Git Bash is resolvable and unconfineable, so it is not probed at all.
+    // Git Bash is resolvable and unconfineable, so it is not probed at all. The
+    // payload also probes Automatic's own resolution, which is a shell the rows
+    // already describe here but is resolved as its own question.
     const probedRows = probed.filter(row => row.confineable)
-    assert.equal(sandbox.calls.length, probedRows.length, 'every probe went through ctx.sandbox.confine')
+    assert.equal(status.auto.saved.id, 'pwsh', 'Automatic resolves to the leading shell here')
+    assert.equal(sandbox.calls.length, probedRows.length + 1, 'every probe went through ctx.sandbox.confine')
     for (const call of sandbox.calls) {
       assert.equal(call.policy.mode, 'workspace-write', 'the deployment policy, not a relaxation')
     }

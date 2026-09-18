@@ -214,16 +214,49 @@ function fakeScope(section = {}, base = {}) {
   }
 }
 
-/** The status payload the host serves, in the shape the card reads. */
+/** The catalog rows the host serves, keyed by the shell they describe. */
+const rows = {
+  pwsh: { id: 'pwsh', label: 'PowerShell', dialect: 'powershell', available: true, path: 'C:/pwsh.exe', version: '7.4.1', confineable: true, confinement: { expected: 'confined', verified: true, observed: 'confirmed' }, usableInMode: true, supportsLoginShell: false, supportsDistro: false },
+  cmd: { id: 'cmd', label: 'Command Prompt (cmd.exe)', dialect: 'cmd', available: true, path: 'C:/cmd.exe', confineable: true, confinement: { expected: 'confined', verified: true, observed: 'confirmed' }, usableInMode: true, supportsLoginShell: false, supportsDistro: false },
+  gitbash: { id: 'gitbash', label: 'Git Bash', dialect: 'bash', available: true, path: 'D:/Git/bin/bash.exe', version: '5.2.15', confineable: false, confineReason: 'measured reason', confinement: { expected: 'unconfined', verified: true, reason: 'measured reason', observed: 'not-probed' }, usableInMode: false, supportsLoginShell: true, supportsDistro: false },
+  wsl: { id: 'wsl', label: 'WSL Bash', dialect: 'wsl', available: false, detail: 'not found', confineable: false, confinement: { expected: 'unconfined', verified: true, observed: 'not-probed' }, usableInMode: false, supportsLoginShell: true, supportsDistro: true },
+}
+
+/**
+ * The status payload the host serves, in the shape the card reads.
+ *
+ * This deployment's Automatic resolves to PowerShell, which is what
+ * `active.selected` reports for the saved selection and what `auto` reports for
+ * itself. The two are separate questions, and the payload can answer them
+ * differently — {@link statusWithAuto} says so.
+ */
 const STATUS = {
-  active: { shell: 'auto', selected: 'cmd', platform: 'windows', mode: 'workspace-write', workspaceRoot: 'D:/work' },
+  active: { shell: 'auto', selected: 'pwsh', platform: 'windows', mode: 'workspace-write', workspaceRoot: 'D:/work' },
+  auto: { saved: { ...rows.pwsh, executable: '' }, withoutOverride: { ...rows.pwsh, executable: '' } },
   confinementVerified: true,
-  shells: [
-    { id: 'pwsh', label: 'PowerShell', dialect: 'powershell', selected: false, available: true, path: 'C:/pwsh.exe', version: '7.4.1', confineable: true, confinement: { expected: 'confined', verified: true, observed: 'confirmed' }, usableInMode: true, supportsLoginShell: false, supportsDistro: false },
-    { id: 'cmd', label: 'Command Prompt (cmd.exe)', dialect: 'cmd', selected: true, available: true, path: 'C:/cmd.exe', confineable: true, confinement: { expected: 'confined', verified: true, observed: 'confirmed' }, usableInMode: true, supportsLoginShell: false, supportsDistro: false },
-    { id: 'gitbash', label: 'Git Bash', dialect: 'bash', selected: false, available: true, path: 'D:/Git/bin/bash.exe', version: '5.2.15', confineable: false, confineReason: 'measured reason', confinement: { expected: 'unconfined', verified: true, reason: 'measured reason', observed: 'not-probed' }, usableInMode: false, supportsLoginShell: true, supportsDistro: false },
-    { id: 'wsl', label: 'WSL Bash', dialect: 'wsl', selected: false, available: false, detail: 'not found', confineable: false, confinement: { expected: 'unconfined', verified: true, observed: 'not-probed' }, usableInMode: false, supportsLoginShell: true, supportsDistro: true },
-  ],
+  shells: Object.values(rows).map(row => ({ ...row, selected: row.id === 'pwsh' })),
+}
+
+/**
+ * The same payload with Automatic resolving to another shell.
+ *
+ * `saved` is what Automatic resolves to under the saved configuration, which an
+ * executable override naming a shell changes; `withoutOverride` is what it
+ * resolves to with no override in force, which is the configuration a shell
+ * switch leaves staged.
+ * @param saved - the row Automatic resolves to under the saved configuration.
+ * @param options - the override that resolution was computed under, and the row
+ *   Automatic resolves to without it.
+ * @returns the payload.
+ */
+function statusWithAuto(saved, options = {}) {
+  return {
+    ...STATUS,
+    auto: {
+      saved: { ...saved, executable: options.executable ?? '' },
+      withoutOverride: { ...(options.withoutOverride ?? saved), executable: '' },
+    },
+  }
 }
 
 /**
@@ -436,7 +469,7 @@ describe('collapsible card', () => {
     assert.equal(card.selectedOption(), 'auto')
     // The trigger reads the shell's name, and Automatic says what it resolves to.
     assert.match(card.triggerText(), /Automatic/)
-    assert.match(texts(all(card.menu().props.items[0].label)).join(''), /resolves to Command Prompt/)
+    assert.match(texts(all(card.menu().props.items[0].label)).join(''), /resolves to PowerShell/)
   })
 })
 
@@ -637,6 +670,37 @@ describe('an override never follows the user to another shell', () => {
     assert.equal(elements(card.tree, 'input').filter(input => input.props.type === 'checkbox').length, 1)
   })
 
+  it('clears a login flag Automatic resolves away from', async () => {
+    // The reported sequence: Git Bash saved with the executable override that
+    // names it, and a login flag staged for it. Switching to Automatic clears
+    // that override, and the flag belongs to the resolution the override
+    // produced: with no override, Automatic picks a shell that takes no login
+    // flag, so the flag goes with it. Reading the saved SELECTION instead left
+    // the flag staged and Save enabled for a write the host refuses.
+    const card = await mountCard({
+      section: { shell: 'gitbash', executable: 'D:/Git/bin/bash.exe', loginShell: true },
+      status: {
+        ...statusWithAuto(rows.gitbash, {
+          executable: 'D:/Git/bin/bash.exe',
+          withoutOverride: rows.pwsh,
+        }),
+        active: { ...STATUS.active, shell: 'gitbash', selected: 'gitbash' },
+      },
+    })
+    card.toggle()
+    card.select('auto')
+    assert.match(card.text(), /Cleared because the shell changed: executable path, login-shell flag/)
+    assert.ok(card.text().includes('C:/pwsh.exe'), 'and the facts describe what Automatic would run')
+    assert.ok(!card.text().includes('D:/Git/bin/bash.exe'), 'not the shell the override named')
+    assert.equal(card.saveDisabled(), false, 'the refused write is gone, not merely blocked')
+    card.save()
+    assert.deepEqual(card.scope.calls[0].mutate, [
+      { op: 'set', path: ['shell'], value: 'auto' },
+      { op: 'set', path: ['loginShell'], value: false },
+      { op: 'set', path: ['executable'], value: '' },
+    ])
+  })
+
   it('keeps an override typed after the shell change', async () => {
     const card = await mountCard({ section: { executable: 'D:/Git/bin/bash.exe' } })
     card.toggle()
@@ -779,18 +843,63 @@ describe('Automatic is a first-class selection', () => {
     const card = await mountCard()
     card.toggle()
     assert.equal(card.selectedOption(), 'auto')
-    assert.match(card.optionText('auto'), /resolves to Command Prompt/)
+    assert.match(card.optionText('auto'), /resolves to PowerShell/)
   })
 
-  it('shows the resolved shell\'s own facts while Automatic is selected', async () => {
-    const card = await mountCard({ status: { ...STATUS, active: { ...STATUS.active, selected: 'pwsh' } } })
+  it('describes Automatic by its own resolution, not by the saved selection', async () => {
+    // The reported confusion: with Git Bash saved, Automatic described Git Bash,
+    // because it read what the saved SELECTION resolved to. What Automatic runs
+    // is its own question, and the host answers it here as PowerShell.
+    const card = await mountCard({
+      section: { shell: 'gitbash' },
+      status: { ...STATUS, active: { ...STATUS.active, shell: 'gitbash', selected: 'gitbash' } },
+    })
+    card.toggle()
+    assert.equal(card.selectedOption(), 'gitbash')
+    assert.match(card.optionText('auto'), /resolves to PowerShell/, 'the option, before it is chosen')
+    card.select('auto')
+    assert.match(card.optionText('auto'), /resolves to PowerShell/)
+    assert.ok(card.text().includes('C:/pwsh.exe'), 'the executable Automatic would run')
+    assert.ok(!card.text().includes('D:/Git/bin/bash.exe'), 'not the saved selection\'s executable')
+  })
+
+  it('describes the Automatic option by the configuration choosing it produces', async () => {
+    // An override naming a shell claims it under Automatic, so this deployment's
+    // Automatic runs Git Bash while the override is in force — and choosing
+    // Automatic is what drops that override. The option has to say what the
+    // choice would run, not what the selection being left currently resolves to.
+    const card = await mountCard({
+      section: { shell: 'gitbash', executable: 'D:/Git/bin/bash.exe' },
+      status: statusWithAuto(rows.gitbash, {
+        executable: 'D:/Git/bin/bash.exe',
+        withoutOverride: rows.pwsh,
+      }),
+    })
+    card.toggle()
+    assert.match(card.optionText('auto'), /resolves to PowerShell/)
+    assert.ok(card.text().includes('D:/Git/bin/bash.exe'), 'the staged configuration still runs Git Bash')
+  })
+
+  it('shows Automatic\'s own facts, including what a call does with it', async () => {
+    const card = await mountCard()
     card.toggle()
     const text = card.text()
-    assert.match(card.optionText('auto'), /resolves to PowerShell/)
     assert.ok(text.includes('C:/pwsh.exe'), 'the executable Automatic resolves to')
     assert.ok(text.includes('7.4.1'), 'its version')
     assert.ok(text.includes('sandbox: can be confined'), 'what the catalog expects')
     assert.ok(text.includes('observed: it ran under the sandbox'), 'and what was observed')
+  })
+
+  it('says an override is unresolved rather than naming a shell it would not run', async () => {
+    // A path the host has not resolved describes no shell yet. Answering with
+    // the saved selection's row would name a shell nothing would run, so the
+    // card says it does not know instead.
+    const card = await mountCard()
+    card.toggle()
+    card.props.edit('executable', 'D:/Git/bin/bash.exe')
+    assert.match(card.optionText('auto'), /resolves to unknown/)
+    assert.ok(card.text().includes('save to see which shell this executable path runs'))
+    assert.ok(!card.text().includes('C:/pwsh.exe'), 'and it does not describe the saved selection instead')
   })
 
   it('returns to Automatic after another shell was saved', async () => {
@@ -805,7 +914,7 @@ describe('Automatic is a first-class selection', () => {
   it('shows an interpreter where a shell has no version flag', async () => {
     const card = await mountCard({
       status: {
-        ...STATUS,
+        ...statusWithAuto({ id: 'sh', label: 'POSIX sh', available: true, path: '/usr/bin/sh', interpreter: 'dash', confineable: true, confinement: { expected: 'confined', verified: false, observed: 'not-probed' }, usableInMode: true, supportsLoginShell: false, supportsDistro: false }),
         active: { ...STATUS.active, platform: 'posix', selected: 'sh' },
         shells: [{ id: 'sh', label: 'POSIX sh', available: true, path: '/usr/bin/sh', interpreter: 'dash', confineable: true, confinement: { expected: 'confined', verified: false, observed: 'not-probed' }, usableInMode: true, supportsLoginShell: false, supportsDistro: false }],
       },
@@ -866,7 +975,7 @@ describe('the fields follow the staged selection', () => {
   it('shows the facts of the staged shell, not the saved one', async () => {
     const card = await mountCard()
     card.toggle()
-    assert.ok(card.text().includes('C:/cmd.exe'), 'the saved shell is cmd')
+    assert.ok(card.text().includes('C:/pwsh.exe'), 'the saved selection is Automatic, resolving to PowerShell')
     card.select('gitbash')
     assert.ok(card.text().includes('D:/Git/bin/bash.exe'), 'the facts follow the draft')
     assert.ok(card.text().includes('measured reason'), 'including why it cannot be confined')

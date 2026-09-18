@@ -92,6 +92,8 @@ window.__ModuleLoader__.load({
       currentShell: 'saved',
       auto: 'Automatic',
       autoResolves: 'resolves to',
+      autoUnknown: 'unknown',
+      autoUnknownHint: 'Automatic is resolved from the saved selection; save to see which shell this executable path runs.',
       notFound: 'not found',
       detected: 'Detected',
       version: 'version',
@@ -146,6 +148,8 @@ window.__ModuleLoader__.load({
       currentShell: '已保存',
       auto: '自动',
       autoResolves: '解析为',
+      autoUnknown: '未知',
+      autoUnknownHint: '「自动」按已保存的选择解析；保存后可看到该可执行文件路径会运行哪个 Shell。',
       notFound: '未找到',
       detected: '已检测到',
       version: '版本',
@@ -350,26 +354,49 @@ window.__ModuleLoader__.load({
         : path.startsWith('/')
     }
 
+    /**
+     * The row Automatic resolves to for one executable override.
+     *
+     * `auto` is not a catalog row: it is whichever shell this machine picks, and
+     * which one that is depends on the executable override in force, because an
+     * override naming a shell claims that shell. The status payload reports the
+     * resolutions for the configurations the card can be describing — the saved
+     * one, and the one a shell switch leaves staged, since clearing the override
+     * is what a save then stores. A staged override that describes neither is
+     * reported as unknown rather than answered with a shell the user did not
+     * pick: the saved selection is a different question from what Automatic runs.
+     * @param status - the last status payload.
+     * @param executable - the executable override the draft carries.
+     * @returns the resolved row, or undefined when the host has not answered for
+     *   this override.
+     */
+    function autoRow(status, executable) {
+      const auto = status?.auto
+      if (auto === undefined) return undefined
+      const basis = executable.trim()
+      if (auto.saved !== undefined && auto.saved.executable === basis) return auto.saved
+      return basis.length === 0 ? auto.withoutOverride : undefined
+    }
+
     /** The catalog row for one shell id, or undefined before the first fetch. */
     function rowFor(status, id) {
       return status?.shells?.find(row => row.id === id)
     }
 
     /**
-     * The catalog row a selection would run, resolving `auto`.
+     * The catalog row a staged selection would run, resolving `auto`.
      *
-     * `auto` is not a row of its own: what it runs is whatever the host resolved
-     * it to, which the status payload reports. Resolving it here is what keeps a
-     * check on the staged selection describing the shell a command would really
-     * use — including for the launch options, which otherwise survive a switch to
-     * Automatic and are refused by the host on save.
+     * Resolving it here is what keeps a check on the staged selection describing
+     * the shell a command would really use — including for the launch options,
+     * which otherwise survive a switch to Automatic and are refused by the host
+     * on save.
      * @param status - the last status payload.
-     * @param shell - a staged or stored shell id, possibly `auto`.
-     * @returns the row, or undefined while the host has not answered.
+     * @param draft - a staged or stored field set, possibly selecting `auto`.
+     * @returns the row, or undefined while the host has not answered for it.
      */
-    function effectiveRow(status, shell) {
-      return rowFor(status, shell)
-        ?? (shell === AUTO ? rowFor(status, status?.active?.selected) : undefined)
+    function effectiveRow(status, draft) {
+      return rowFor(status, draft.shell)
+        ?? (draft.shell === AUTO ? autoRow(status, draft.executable) : undefined)
     }
 
     /** The staged form's value at rest: every field with its stored fallback. */
@@ -433,7 +460,7 @@ window.__ModuleLoader__.load({
       const failures = {}
       const executable = draft.executable.trim()
       const mountRoot = draft.wslMountRoot.trim()
-      const selected = effectiveRow(status, draft.shell)
+      const selected = effectiveRow(status, draft)
 
       if (executable.length > 0 && /[\\/]/u.test(executable)
         && platform !== undefined && !isAbsoluteFor(platform, executable)) {
@@ -567,23 +594,28 @@ window.__ModuleLoader__.load({
        * where the first fails the host's identity check and the second blocks the
        * save with a control the new shell does not render. The draft says what it
        * dropped rather than doing it silently.
+       *
+       * The fields a switch drops are decided on the configuration the switch
+       * LEAVES, not the one it started from: clearing the executable override
+       * changes which shell Automatic resolves to, and therefore whether a login
+       * flag survives the move.
        */
       edit(field, value) {
         const current = this.store.getSnapshot()
         if (!current.writable || current.saving) return
         const changedShell = field === 'shell' && value !== current.draft.shell
-        const next = changedShell ? effectiveRow(current.status, value) : undefined
+        const staged = { ...current.draft, [field]: value }
         const cleared = []
-        if (changedShell && current.draft.executable.length > 0) cleared.push('executable')
-        if (changedShell && current.draft.loginShell && next !== undefined && next.supportsLoginShell !== true) {
+        if (changedShell && staged.executable.length > 0) {
+          cleared.push('executable')
+          staged.executable = ''
+        }
+        const next = changedShell ? effectiveRow(current.status, staged) : undefined
+        if (changedShell && staged.loginShell && next !== undefined && next.supportsLoginShell !== true) {
           cleared.push('loginShell')
+          staged.loginShell = false
         }
-        const draft = {
-          ...current.draft,
-          [field]: value,
-          ...cleared.includes('executable') ? { executable: '' } : {},
-          ...cleared.includes('loginShell') ? { loginShell: false } : {},
-        }
+        const draft = staged
         this.store.set({
           ...current,
           draft,
@@ -716,14 +748,31 @@ window.__ModuleLoader__.load({
       if (!state.available) return null
 
       // `auto` is a setting value with no catalog row of its own, so what it
-      // currently resolves to is what the facts should describe.
-      const resolvedId = status?.active?.selected
-      const selected = effectiveRow(status, draft.shell)
-      const savedRow = effectiveRow(status, stored.shell)
+      // would run is what the facts should describe — and the Automatic option
+      // is described by the configuration choosing it produces, which drops a
+      // staged executable override rather than resolving through it.
+      const chosenAuto = autoRow(status, draft.shell === AUTO ? draft.executable : '')
+      const selected = effectiveRow(status, draft)
+      const savedRow = effectiveRow(status, stored)
       const invalid = Object.keys(failures).length > 0
       const blocked = !dirty || invalid || saving || !writable
       const platform = status?.active?.platform
       const interactive = writable && !saving
+      // Automatic has an answer for a staged executable path only once the host
+      // has resolved that path, and saying so is different from naming a shell:
+      // the saved selection is a different question from what Automatic runs.
+      const autoUnknown = draft.shell === AUTO && selected === undefined && status?.shells !== undefined
+
+      /**
+       * How a resolution reads after "resolves to".
+       *
+       * Three states, three sentences: the host has not answered yet, it has not
+       * resolved this executable override, or it resolved and found no shell.
+       * Only the last is "not found", and reporting a shell nothing would run is
+       * what this is here to avoid.
+       */
+      const autoName = resolution => resolution?.label
+        ?? (status?.auto === undefined ? '…' : resolution === undefined ? t('autoUnknown') : t('notFound'))
 
       /** One option's label: the shell's name, then its own fact more quietly. */
       const optionLabel = (name, meta) => meta === undefined || meta.length === 0
@@ -736,7 +785,7 @@ window.__ModuleLoader__.load({
       const shellOptions = [
         {
           id: AUTO,
-          label: optionLabel(t('auto'), t('autoResolves') + ' ' + (rowFor(status, resolvedId)?.label ?? '…')),
+          label: optionLabel(t('auto'), t('autoResolves') + ' ' + autoName(chosenAuto)),
         },
         ...(status?.shells ?? []).map(row => ({
           id: row.id,
@@ -792,6 +841,8 @@ window.__ModuleLoader__.load({
           key: 'usable',
           className: selected.usableInMode === false ? 'dsss-factsError' : undefined,
         }, selected.usableInMode === false ? t('blockedInMode') : t('usableInMode')))
+      } else if (autoUnknown) {
+        facts.push(h('span', { key: 'auto', className: 'dsss-factsQuiet' }, t('autoUnknownHint')))
       } else if (status !== undefined && status.shells === undefined) {
         facts.push(h('span', { key: 'none', className: 'dsss-factsError' },
           `${t('statusFailed')}${status.error === undefined ? '' : `: ${status.error}`}`))

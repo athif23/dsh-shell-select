@@ -402,6 +402,47 @@ export class ShellSelectExecutor extends PLATFORM_BASE {
   }
 
   /**
+   * Resolve `auto` for one configuration: the shell this machine picks when the
+   * selection is left to it.
+   *
+   * A different question from which entry the settings select, and answered
+   * separately, because an explicit selection may name a shell `auto` would never
+   * choose. The answer depends on the executable override in force — an override
+   * naming a shell claims that shell under `auto` (see
+   * {@link ShellSelectExecutor.resolveEntry}) — so the caller names the override
+   * it is asking about instead of this method deciding which one is meant.
+   * @param options - the settings snapshot the resolution answers for, the
+   *   executable override to resolve under (`''` for none, which is the one the
+   *   saved configuration itself carries when omitted), and cancellation.
+   * @returns the entry `auto` resolves to with its resolution, or the diagnostic
+   *   for a machine where the catalog resolves nothing.
+   */
+  async resolveAuto(options = {}) {
+    const source = options.settings ?? this.selectSettings
+    const settings = settingsSnapshot({
+      ...source,
+      shell: AUTO_SHELL,
+      executable: options.executable ?? source.executable,
+    })
+    const platform = await this.executionPlatformNow()
+    const entry = await this.resolveEntry(platform, options.signal, settings)
+    if (entry === undefined) {
+      return { platform, available: false, detail: this.unresolvedSelection(platform, settings) }
+    }
+    return {
+      platform,
+      entry,
+      ...await inspectShell(this.ctx, {
+        entry,
+        configuredPath: this.overrideFor(entry, settings, true),
+        env: undefined,
+        signal: options.signal,
+        platform,
+      }),
+    }
+  }
+
+  /**
    * Refresh the cached selection facts from the execution world.
    *
    * Overlapping refreshes are expected — a settings write during a first read,
