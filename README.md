@@ -80,7 +80,7 @@ guarantee, and this plugin adds no destructive-command detection.
 Stated plainly, because a compatibility claim you cannot check is worse than no
 claim. Every number below is from a run of `pnpm test` in this repository.
 
-**On Windows 10.0.26200, against DSH `0.1.6-alpha.1`:** 226 tests, 225 passing, 1
+**On Windows 10.0.26200, against DSH `0.1.6-alpha.1`:** 228 tests, 227 passing, 1
 skipped (`pwsh` is not installed here).
 
 **On Linux (Ubuntu) and macOS:** the suites are written to run on either platform
@@ -170,10 +170,19 @@ cannot silently regress.
 - **`fish` and `zsh` have not been run at all**, on any platform. Their entries
   are catalog rows with dialect `bash`; fish's non-POSIX syntax is documented for
   the model but not exercised. `sh` is run by CI's POSIX lane when installed.
-- **The Web card has not been rendered in a browser.** Its bundle, module-loader
-  contract, slot key, copy, and data flow are tested against stand-ins for React
-  and the slot registry — a hand-written stand-in, not real React — so browser
-  interaction, layout, and anything a real renderer decides remain unverified.
+- **The Web card has been rendered in a browser once, on Windows, in an isolated
+  `DSH_HOME`.** Save, Discard, the dropdown, the facts, Test shell, and the
+  save-during-test sequence were exercised against the running harness: the card
+  listed its options with per-shell facts, the Test action reported
+  `cmd → exit 0 / DSH-SHELL-SELECT-TEST-OK`, a save persisted `shell: auto` to the
+  settings document, and the Test button released itself so a second run
+  completed. That run also found a gap the suite had missed (a staged launch
+  option surviving a switch to Automatic), which is fixed and now covered. What
+  remains unverified: any other platform or browser, and the parts of the card
+  the run did not touch — the override/save-failure paths in a live browser, real
+  pointer interaction (the check drove the UI through the DOM, because Playwright
+  actionability timed out on this dialog), keyboard navigation, and layout at
+  other widths and themes.
 
 ## Execution routes: covered and not covered
 
@@ -303,6 +312,11 @@ says so under the selector: that path would either fail the host's identity chec
 or pair one shell's binary with another's launch arguments, and the flag would
 block the save with a control the new shell does not even render. Type them again
 after the switch if they still apply.
+
+**Automatic is judged as the shell it resolves to.** It is not a row of its own,
+so a staged launch option is checked against whatever the host reports `auto`
+currently running — otherwise a login flag staged for Git Bash would survive a
+switch to Automatic and be refused by the host on save, with Save still enabled.
 
 Clearing a field means what that field means. An empty **executable path** is *no
 override*, so clearing it writes an explicit empty and shadows a path that came
@@ -439,7 +453,7 @@ nothing this plugin exercises needs those scripts to run. The prebuilt binaries
 those packages ship are what the real subprocess and sandbox providers use, and
 the integration lane proves they work.
 
-226 tests across twelve suites. Everything disposable lives under an approved
+228 tests across twelve suites. Everything disposable lives under an approved
 scratch root: `<projectRoot>/.test-tmp/<unique-id>/` by default, or
 `DSH_SHELL_SELECT_TEST_TMP` when this checkout has no scratch of its own outside
 the user profile. `test/helpers.mjs` validates the root before creating anything

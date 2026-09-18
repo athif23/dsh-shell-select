@@ -355,6 +355,23 @@ window.__ModuleLoader__.load({
       return status?.shells?.find(row => row.id === id)
     }
 
+    /**
+     * The catalog row a selection would run, resolving `auto`.
+     *
+     * `auto` is not a row of its own: what it runs is whatever the host resolved
+     * it to, which the status payload reports. Resolving it here is what keeps a
+     * check on the staged selection describing the shell a command would really
+     * use — including for the launch options, which otherwise survive a switch to
+     * Automatic and are refused by the host on save.
+     * @param status - the last status payload.
+     * @param shell - a staged or stored shell id, possibly `auto`.
+     * @returns the row, or undefined while the host has not answered.
+     */
+    function effectiveRow(status, shell) {
+      return rowFor(status, shell)
+        ?? (shell === AUTO ? rowFor(status, status?.active?.selected) : undefined)
+    }
+
     /** The staged form's value at rest: every field with its stored fallback. */
     function draftFrom(snapshot) {
       return {
@@ -416,7 +433,7 @@ window.__ModuleLoader__.load({
       const failures = {}
       const executable = draft.executable.trim()
       const mountRoot = draft.wslMountRoot.trim()
-      const selected = rowFor(status, draft.shell)
+      const selected = effectiveRow(status, draft.shell)
 
       if (executable.length > 0 && /[\\/]/u.test(executable)
         && platform !== undefined && !isAbsoluteFor(platform, executable)) {
@@ -555,7 +572,7 @@ window.__ModuleLoader__.load({
         const current = this.store.getSnapshot()
         if (!current.writable || current.saving) return
         const changedShell = field === 'shell' && value !== current.draft.shell
-        const next = changedShell ? rowFor(current.status, value) : undefined
+        const next = changedShell ? effectiveRow(current.status, value) : undefined
         const cleared = []
         if (changedShell && current.draft.executable.length > 0) cleared.push('executable')
         if (changedShell && current.draft.loginShell && next !== undefined && next.supportsLoginShell !== true) {
@@ -701,10 +718,8 @@ window.__ModuleLoader__.load({
       // `auto` is a setting value with no catalog row of its own, so what it
       // currently resolves to is what the facts should describe.
       const resolvedId = status?.active?.selected
-      const selected = rowFor(status, draft.shell)
-        ?? (draft.shell === AUTO ? rowFor(status, resolvedId) : undefined)
-      const savedRow = rowFor(status, stored.shell)
-        ?? (stored.shell === AUTO ? rowFor(status, resolvedId) : undefined)
+      const selected = effectiveRow(status, draft.shell)
+      const savedRow = effectiveRow(status, stored.shell)
       const invalid = Object.keys(failures).length > 0
       const blocked = !dirty || invalid || saving || !writable
       const platform = status?.active?.platform

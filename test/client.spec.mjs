@@ -609,6 +609,34 @@ describe('an override never follows the user to another shell', () => {
     assert.equal(card.saveDisabled(), false, 'and unticking it is the way out')
   })
 
+  it('clears a launch option that Automatic would not take either', async () => {
+    // `auto` is not a row: what it runs is the resolved shell, so a flag staged
+    // for Git Bash has to be judged against that shell. Judging it against
+    // nothing let the card save a flag the host refuses, with Save enabled.
+    const card = await mountCard({ section: { shell: 'cmd' } })
+    card.toggle()
+    card.select('gitbash')
+    const box = elements(card.tree, 'input').find(input => input.props.type === 'checkbox')
+    box.props.onChange({ target: { checked: true } })
+    card.select('auto')
+    assert.match(card.text(), /Cleared because the shell changed: login-shell flag/)
+    // The draft now differs from the saved shell, so there is something to write
+    // — and what would be written carries no flag the host refuses.
+    assert.equal(card.saveDisabled(), false, 'and the refused write is gone, not merely blocked')
+    card.save()
+    assert.deepEqual(card.scope.calls[0].mutate, [{ op: 'set', path: ['shell'], value: 'auto' }])
+  })
+
+  it('blocks a login flag Automatic cannot take, with the control on screen', async () => {
+    // The same check for a value that arrived from elsewhere: the resolved shell
+    // takes no login flag, so the write is refused — and the box that clears it
+    // is rendered, which is what keeps the refusal recoverable.
+    const card = await mountCard({ section: { shell: 'auto', loginShell: true } })
+    card.toggle()
+    assert.equal(card.saveDisabled(), true, 'cmd is what auto resolves to here, and it takes no flag')
+    assert.equal(elements(card.tree, 'input').filter(input => input.props.type === 'checkbox').length, 1)
+  })
+
   it('keeps an override typed after the shell change', async () => {
     const card = await mountCard({ section: { executable: 'D:/Git/bin/bash.exe' } })
     card.toggle()
