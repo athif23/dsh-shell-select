@@ -80,8 +80,16 @@ guarantee, and this plugin adds no destructive-command detection.
 Stated plainly, because a compatibility claim you cannot check is worse than no
 claim. Every number below is from a run of `pnpm test` in this repository.
 
-**Tested by the author, on Windows 10.0.26200 against DSH `0.1.6-alpha.1`:** 205
-tests, 204 passing, 1 skipped (`pwsh` is not installed here).
+**On Windows 10.0.26200, against DSH `0.1.6-alpha.1`:** 224 tests, 223 passing, 1
+skipped (`pwsh` is not installed here).
+
+**On Linux (Ubuntu) and macOS:** the suites are written to run on either platform
+and CI runs them on `ubuntu-latest` and `macos-latest`. The last independent Linux
+run, by a reviewer, executed Bash, Zsh, and `sh` through the plugin and reported
+that host has no usable sandbox backend — so it verified the refusal path rather
+than filesystem confinement. That run found host-dependent test boundaries, all
+of which are fixed here; the fixes are asserted by cases that pass on either
+platform, and CI is what confirms them.
 
 - Every catalog entry's argv, end to end, for `cmd`, Windows PowerShell 5.1, Git
   Bash, and WSL (Ubuntu 22.04) through the real subprocess and sandbox providers.
@@ -103,6 +111,14 @@ tests, 204 passing, 1 skipped (`pwsh` is not installed here).
 - The `shell` tool and its global guard mount cleanly inside a real DSH web
   composition (isolated `DSH_HOME`), and the Web card's bundle is discovered,
   placed in the boot graph, and served.
+- The two host-independence rules that a Linux run found broken: a Windows
+  composition simulated on a POSIX host resolves Windows-shaped paths (the
+  catalog never joins with the host's separator, and it normalizes the paths the
+  harness contributes), and the working-directory rule answers *shape* for any
+  platform but *existence* only for the platform that owns the filesystem.
+- The fixture guard: a fixture root inside the real user profile is refused
+  before anything is created, containment is decided on canonical paths, and a
+  checkout inside the profile must name an approved root outside it.
 
 **Verified as logic on any host, both platforms:** the catalogs, the dialect
 builders, the resolution walk, the identity guard, the per-platform
@@ -155,7 +171,8 @@ cannot silently regress.
   the model but not exercised. `sh` is run by CI's POSIX lane when installed.
 - **The Web card has not been rendered in a browser.** Its bundle, module-loader
   contract, slot key, copy, and data flow are tested against stand-ins for React
-  and the slot registry; no browser has drawn it.
+  and the slot registry — a hand-written stand-in, not real React — so browser
+  interaction, layout, and anything a real renderer decides remain unverified.
 
 ## Execution routes: covered and not covered
 
@@ -267,7 +284,10 @@ Opening it shows:
   force, and whether the shell is usable under that mode — plus the measured
   refusal reason when it cannot be;
 - the **executable path**, the **login-shell** toggle, and the WSL **distribution**
-  and **mount root**, each shown only for the shells they apply to.
+  and **mount root**, each shown only for the shells they apply to. The
+  login-shell control also stays on screen whenever it holds a value that needs
+  correcting, so a flag that arrived from somewhere else is never a failure with
+  nothing to press;
 
 **Edits are staged and written on Save**, matching the shipped cards: choosing a
 shell, typing a path, or ticking a box changes nothing until you press **Save**,
@@ -276,18 +296,29 @@ mutation**, so it lands whole or not at all, and the card collapses only after i
 does — a rejected write keeps its diagnostics, the host's own message, and your
 edits in place.
 
-Changing the shell **clears a staged executable override**, and says so at the
-field: that path was given for the shell you are leaving, and carrying it over
-would either fail the host's identity check or pair one shell's binary with
-another's launch arguments. Type it again after the switch if it still applies.
+Changing the shell **clears what belonged to the shell you are leaving** — a
+staged executable override, and a login flag the new shell does not take — and
+says so under the selector: that path would either fail the host's identity check
+or pair one shell's binary with another's launch arguments, and the flag would
+block the save with a control the new shell does not even render. Type them again
+after the switch if they still apply.
+
+Clearing a field means what that field means. An empty **executable path** is *no
+override*, so clearing it writes an explicit empty and shadows a path that came
+from the composition — unsetting a value you never set would simply bring that
+path back. Empty **wslDistro** and **wslMountRoot** mean *use the configured
+default*, so those unset and the default returns, exactly as their hints say.
 
 Because the facts follow the *staged* selection, you can see what a shell would
 resolve to before committing to it. **Test shell** runs the *saved* selection —
 a module constant (`echo DSH-SHELL-SELECT-TEST-OK`) with no input, through the
 same decide/run path a model call takes, so it reports the same refusal a model
 call would get and never demonstrates a capability the tool itself would not
-grant. A result is dropped, with a note, once a save changes the shell it
-described.
+grant. A result — on screen or still in flight — is dropped, with a note, as soon
+as the saved configuration changes under it: the shell, the executable, the login
+flag, the distribution, or the mount root, whether the change came from this card,
+another window, or a hand-edited document. A result for a selection the host is no
+longer running would be worse than no result.
 
 Version probes are the one place the card runs something, and they run the same
 way a command does: fixed plugin-owned arguments, through `ctx.sandbox.confine`
@@ -299,7 +330,9 @@ option" on `--version` is reported as the error it is rather than as a version.
 The card also **blocks a save the Host would refuse** — a relative path carrying
 a separator, a mount root that is not a Linux path, a login flag on a shell that
 takes none — with the reason at the field, instead of staging a write that comes
-back rejected.
+back rejected. Each such check applies only while its own field is on screen: a
+refusal the user cannot reach is a disabled Save with no way out, which is the bug
+that rule exists for.
 
 Both host routes (`/dsh-shell-select/status`, `/dsh-shell-select/test`) are
 registered on the host web server and **refuse any non-loopback peer**. They
@@ -402,11 +435,25 @@ nothing this plugin exercises needs those scripts to run. The prebuilt binaries
 those packages ship are what the real subprocess and sandbox providers use, and
 the integration lane proves they work.
 
-205 tests across eleven suites. Everything disposable lives under
-`<projectRoot>/.test-tmp/<unique-id>/`, where the project root is this package's
-own directory — never a parent, never a home directory. `test/helpers.mjs`
-refuses to remove a path outside that tree, and no test reads or writes a real
-harness home.
+224 tests across twelve suites. Everything disposable lives under an approved
+scratch root: `<projectRoot>/.test-tmp/<unique-id>/` by default, or
+`DSH_SHELL_SELECT_TEST_TMP` when this checkout has no scratch of its own outside
+the user profile. `test/helpers.mjs` validates the root before creating anything
+and refuses one inside the real profile, decides containment on canonical paths
+rather than lexical ones, refuses to remove anything outside the root it
+validated, and no test reads or writes a real harness home. `test/helpers.spec.mjs`
+asserts that.
+
+A clone that lives inside the user profile — a GitHub runner, or a checkout in
+`$HOME` — has no such scratch, so it must name one:
+
+```sh
+DSH_SHELL_SELECT_TEST_TMP=/tmp/dsh-shell-select pnpm test
+```
+
+The suite stops with that instruction rather than falling back to the profile,
+and CI sets the variable per runner. On Windows the default profile excludes
+`%TEMP%` too, since it is under the profile; name a directory outside it.
 
 `pnpm test:execution` runs only the suites that spawn real processes.
 
@@ -444,12 +491,13 @@ entries — so a lane that stops being covered fails rather than going quiet.
 | `tool.spec.mjs` | The per-call record: the shell, executable, and working directory come from the call's own decision for foreground and background, an aborted or refused background call never reaches the job registry, and the description names the selected shell |
 | `cmd-command-transport.spec.mjs` | The direct form's measured corruption, the transport carrying quotes/redirection/chaining/Unicode filenames, the `%NAME%` limitation and its `call` opt-in |
 | `integration.spec.mjs` | Real processes on this host's lane: every required and installed shell, real confinement denial or a fail-closed refusal, timeout, cancellation, background read/kill, spaces and Unicode in the working directory, and `auto` |
+| `helpers.spec.mjs` | The fixture rule itself: profile roots are canonical and refused, an approved root is honored, removal is contained and exact, and a simulated platform gets a path shaped for it |
 | `lanes.mjs` | The lane definitions themselves: which shells a platform's lane must cover and which may skip |
 | `platform-lanes.spec.mjs` | The verification boundary itself, asserted so it cannot be overclaimed |
 | `status.spec.mjs` | The separated status facts, probes running confined or not at all, a non-zero probe exit as a failure, the `sh` interpreter probe, the test action's refusal path, and the loopback restriction |
 | `settings.spec.mjs` | Persistence across a fresh composition, unrelated edits surviving, a change applying only to later calls |
 | `replacement.spec.mjs` | The guard denying every replaced name and leaving unrelated tools alone |
-| `client.spec.mjs` | The card bundle and its interaction: the slot key, the injected stylesheet and the design tokens it uses, collapsed-by-default disclosure, staging on choose, one revision-fenced save, discard, the override cleared on a shell change, stale-status and obsolete-test handling, boolean-versus-string field values, and the validation that blocks a save the host would refuse |
+| `client.spec.mjs` | The card bundle and its interaction: the slot key, the injected stylesheet and the design tokens it uses, collapsed-by-default disclosure, staging on choose, one revision-fenced save, discard, launch options and overrides cleared on a shell change (and the note that says so), an inherited value shadowed rather than unset, a test result and an in-flight test response dropped when the saved configuration moves, stale-status ordering, boolean-versus-string field values, and the validation that blocks a save the host would refuse while keeping the way out visible |
 
 ## Known limitations
 
@@ -466,8 +514,12 @@ entries — so a lane that stops being covered fails rather than going quiet.
   table.
 - **Windows sandbox enforcement is `partial`** by the harness's own rating.
 - **Working-directory validation reads the local filesystem**, so it describes
-  the local execution world. It is a typo guard, not a security boundary, and it
-  never substitutes another directory.
+  the local execution world. Its *shape* check runs for any platform, but its
+  *existence* check runs only when the execution platform is the one this process
+  runs on: a local `stat` cannot answer for another machine, and refusing on it
+  would refuse a directory that is valid in the execution world. There, the
+  provider that owns the filesystem refuses a missing directory at spawn. It is a
+  typo guard, not a security boundary, and it never substitutes another directory.
 - **The loopback restriction is on the plugin's own routes**, not on the tool: an
   agent on the same machine reaches `shell` normally.
 - **The identity guard is a pairing check, not executable authentication.** It
