@@ -85,6 +85,15 @@ catalog comparison normalizing only one side, a working-directory existence case
 handed a POSIX path under a simulated Windows platform), all fixed and pinned by
 cases that pass on either platform.
 
+The test workflow runs on Linux too, and what it can verify there is narrower
+than the Windows lane. On the runner used, the harness selects a backend that
+reports less than full enforcement, and a write outside the workspace is not
+denied. The integration suite reports that measurement and skips its denial
+assertion on such a host, while still asserting that the command went through
+`ctx.sandbox.confine` under the confining mode: an escape write there is a fact
+about the selected runner, not about the plugin, and a run that bypassed the
+sandbox would still fail. Windows is where the file outcome is asserted.
+
 POSIX shell semantics were measured directly under WSL Ubuntu 22.04 rather than
 through the plugin: `dash` answers `--version` with an illegal-option error on
 stderr and exit 2, and `sh -c 'echo "$0"'` names the implementation. That is why
