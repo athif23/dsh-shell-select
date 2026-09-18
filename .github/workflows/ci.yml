@@ -4,9 +4,12 @@
 # working-directory rules are pure functions of `(platform, environment)` and run
 # on every runner; the suites themselves are written so a simulated Windows
 # composition passes on a POSIX host and the other way round. What differs by
-# platform is execution: the POSIX lane is spawned on ubuntu and macos, the
-# Windows lane on windows, and `test/integration.spec.mjs` runs whichever lane
-# belongs to the runner it is on. A required shell of that lane never skips.
+# platform is execution: the POSIX lane is spawned on ubuntu, the Windows lane on
+# windows, and `test/integration.spec.mjs` runs whichever lane belongs to the
+# runner it is on. A required shell of that lane never skips.
+#
+# Windows is the primary platform and Linux the secondary one. macOS is not in
+# the matrix, so nothing here claims it.
 #
 # `test/lanes.mjs` fixes which shells each lane must cover, and
 # `test/platform-lanes.spec.mjs` asserts that the lanes still name real catalog
@@ -23,7 +26,7 @@ on:
 # directory, and no fixture may be created under a user profile. The suites
 # refuse a profile-contained fixture root and say how to approve one, so the test
 # step names a scratch directory outside the profile: `/tmp` on the POSIX
-# runners, and the runner's own temp volume on Windows (`D:\a\_temp`, not
+# runner, and the runner's own temp volume on Windows (`D:\a\_temp`, not
 # `C:\Users\...`). The setting lives on the step because `runner.*` is not
 # available to workflow-level or job-level `env`.
 jobs:
@@ -31,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [windows-latest, ubuntu-latest]
         node: ['22.19', '24']
     runs-on: ${{ matrix.os }}
     steps:

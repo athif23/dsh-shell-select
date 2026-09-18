@@ -92,10 +92,10 @@ the `sh` entry asks for its interpreter instead of a version.
 
 ### macOS and everything else
 
-macOS is unverified: no run has been executed there. The CI workflow runs the
-suite on `ubuntu-latest` and `macos-latest`, so check the latest run before
-relying on either; this document does not claim the workflow's current state.
-Remote execution worlds (SSH or hosted providers) are also unexercised:
+macOS is unverified: no run has been executed there, and it is not in the test
+workflow's matrix. CI runs the suite on Windows and Linux, so check the latest
+run before relying on either; this document does not claim the workflow's current
+state. Remote execution worlds (SSH or hosted providers) are also unexercised:
 resolution goes through `ctx.subprocess`, which should resolve against the remote
 filesystem, but no such provider was available to test.
 

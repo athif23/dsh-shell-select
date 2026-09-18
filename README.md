@@ -49,9 +49,6 @@ running profile keeps the bundle set it started with, so restart it:
 dsh web          # the same as dsh --profile web
 ```
 
-The package is not on the npm registry yet; until it is, install from a
-[checkout](#installing-from-a-checkout) instead of by name.
-
 Then, in the app:
 
 1. Open **Settings → Plugins** and expand **Shell selection**.
@@ -99,8 +96,8 @@ not installed there.
 **Linux is secondary.** An independent review ran the suites on Linux and
 executed `bash`, `zsh`, and `sh` through the plugin, but that host had no usable
 sandbox backend, so Linux confinement is not verified. **macOS is unverified.**
-The test workflow runs the suite on `ubuntu-latest` and `macos-latest`; check its
-latest run rather than trusting a claim here.
+The test workflow runs the suite on Windows and Linux only; check its latest run
+rather than trusting a claim here.
 
 Measurements, exceptions, and what remains untested are in
 [testing.md](docs/testing.md). The routing rules and execution detail are in
