@@ -178,12 +178,13 @@ function fakeDocument() {
 }
 
 /**
- * A stand-in settings scope backed by one mutable section.
+ * A stand-in settings scope backed by one mutable section, over an optional
+ * base layer: a value the user's layer does not set but the composition does.
  *
  * `mutate` applies the ops the way the Host would, so a test can assert both the
  * wire call and the state the card then re-seeds from.
  */
-function fakeScope(section = {}) {
+function fakeScope(section = {}, base = {}) {
   const listeners = new Set()
   const calls = []
   const notify = () => { for (const listener of [...listeners]) listener() }
@@ -194,7 +195,7 @@ function fakeScope(section = {}) {
       status: 'ready',
       value: { shell: 'auto', loginShell: false, wslMountRoot: '/mnt', ...section },
       user: section,
-      base: {},
+      base,
       revision: 7,
       writable: true,
       mode: 'host',
@@ -241,7 +242,7 @@ async function mountCard(options = {}) {
       : { ok: true, stage: 'ran', shell: 'cmd', exitCode: 0, stdout: 'OK' }),
   })
 
-  const scope = fakeScope(options.section ?? {})
+  const scope = fakeScope(options.section ?? {}, options.base ?? {})
   let registration
   let dictionary
   const ctx = {
@@ -489,14 +490,39 @@ describe('staged form', () => {
     assert.deepEqual(card.scope.calls[0].mutate, [{ op: 'set', path: ['shell'], value: 'gitbash' }])
   })
 
-  it('stages a cleared override as an unset, so the field re-inherits', async () => {
+  it('clears an override as an explicit empty, so a lower layer cannot show through', async () => {
     const card = await mountCard({ section: { executable: 'D:/Git/bin/bash.exe' } })
     card.toggle()
     const reset = classButtons(card.tree, 'dsss-reset')[0]
     assert.ok(reset, 'an overridden field offers the reset')
     reset.props.onClick()
     card.save()
-    assert.deepEqual(card.scope.calls[0].mutate, [{ op: 'unset', path: ['executable'] }])
+    // `executable` empty means "no override", so an unset would leave the
+    // document's own value in force and the field would return on the re-seed.
+    assert.deepEqual(card.scope.calls[0].mutate, [{ op: 'set', path: ['executable'], value: '' }])
+    assert.equal(card.snapshot().stored.executable, '', 'the effective value is empty')
+  })
+
+  it('shadows an inherited executable the user never set', async () => {
+    // The value comes from the composition rather than the user's layer: there is
+    // nothing of theirs to unset, and an `unset` would restore this exact path.
+    const card = await mountCard({ base: { executable: 'D:/Git/bin/bash.exe' } })
+    card.toggle()
+    assert.ok(card.text().includes('Replaceable'), 'an inherited value is still an override in force')
+    card.props.edit('executable', '')
+    card.save()
+    assert.deepEqual(card.scope.calls[0].mutate, [{ op: 'set', path: ['executable'], value: '' }])
+    assert.equal(card.snapshot().stored.executable, '', 'the inherited path is shadowed, not revealed')
+  })
+
+  it('still unsets a field whose empty value means "inherit"', async () => {
+    // `wslMountRoot` differs on purpose: empty there means "use the configured
+    // default", so the layer below is what should show through again.
+    const card = await mountCard({ section: { shell: 'wsl', wslMountRoot: '/opt/mnt' } })
+    card.toggle()
+    card.props.edit('wslMountRoot', '')
+    card.save()
+    assert.deepEqual(card.scope.calls[0].mutate, [{ op: 'unset', path: ['wslMountRoot'] }])
   })
 
   it('carries a staged boolean, not its text form', async () => {
@@ -542,13 +568,45 @@ describe('an override never follows the user to another shell', () => {
     card.toggle()
     assert.ok(card.text().includes('Replaceable'), 'the field reports its override')
     card.select('cmd')
-    assert.ok(card.text().includes('Cleared: this path was set for another shell.'), 'the clear is announced')
+    assert.match(card.text(), /Cleared because the shell changed: executable path/, 'the clear is announced')
     assert.ok(!card.text().includes('Replaceable'), 'the override is gone from the draft')
     card.save()
     assert.deepEqual(card.scope.calls[0].mutate, [
       { op: 'set', path: ['shell'], value: 'cmd' },
-      { op: 'unset', path: ['executable'] },
+      { op: 'set', path: ['executable'], value: '' },
     ])
+  })
+
+  it('clears a launch option the new shell does not take, and says so', async () => {
+    // The reported dead end: the flag survived the switch, validation refused the
+    // write, and the checkbox that could clear it was not rendered for the new
+    // shell — a disabled Save with nothing to press.
+    const card = await mountCard()
+    card.toggle()
+    card.select('gitbash')
+    const checkbox = elements(card.tree, 'input').find(input => input.props.type === 'checkbox')
+    checkbox.props.onChange({ target: { checked: true } })
+    assert.equal(card.saveDisabled(), false, 'bash takes a login flag')
+    card.select('cmd')
+    assert.match(card.text(), /Cleared because the shell changed: login-shell flag/, 'the clear is announced where the user acted')
+    assert.equal(card.saveDisabled(), false, 'and Save stays reachable')
+    card.save()
+    // The flag was staged, never saved, so dropping it leaves nothing to write:
+    // the point is that the incompatible value is gone rather than carried over.
+    assert.deepEqual(card.scope.calls[0].mutate, [{ op: 'set', path: ['shell'], value: 'cmd' }])
+    assert.equal(card.snapshot().draft.loginShell, false)
+  })
+
+  it('keeps the login-shell control reachable when a staged value needs correcting', async () => {
+    // A flag that arrived from elsewhere cannot be cleared on the way in, so the
+    // control it needs has to be on screen even where the shell takes no such flag.
+    const card = await mountCard({ section: { shell: 'cmd', loginShell: true } })
+    card.toggle()
+    const boxes = elements(card.tree, 'input').filter(input => input.props.type === 'checkbox')
+    assert.equal(boxes.length, 1, 'the control is rendered for an incompatible staged value')
+    assert.equal(card.saveDisabled(), true, 'which the host would still refuse')
+    boxes[0].props.onChange({ target: { checked: false } })
+    assert.equal(card.saveDisabled(), false, 'and unticking it is the way out')
   })
 
   it('keeps an override typed after the shell change', async () => {
@@ -601,15 +659,49 @@ describe('the host reads stay current', () => {
     assert.ok(card.text().includes('changed since this test ran'), 'and the card says why it went')
   })
 
-  it('keeps a test result when the save did not change the selection', async () => {
+  it('drops a result once a launch option changes, since the test ran without it', async () => {
     const card = await mountCard()
     card.toggle()
     await card.props.testShell()
+    assert.ok(card.text().includes('exit 0'))
+    card.select('gitbash')
     card.props.edit('loginShell', true)
     card.save()
     await card.settle()
     card.toggle()
-    assert.ok(card.text().includes('exit 0'), 'a login-shell toggle does not invalidate the test')
+    assert.ok(!card.text().includes('exit 0'), 'loginShell changes how the tested command ran')
+    assert.ok(card.text().includes('changed since this test ran'))
+  })
+
+  it('drops a response that lands after the saved selection changed', async () => {
+    // The reported sequence: start a test, save another shell, and let the first
+    // response finish — it must not appear under the new selection.
+    const card = await mountCard()
+    card.toggle()
+    const held = []
+    globalThis.fetch = (url, options) => (options?.method === 'POST'
+      ? new Promise(resolve => { held.push(resolve) })
+      : Promise.resolve({ ok: true, json: async () => STATUS }))
+    const running = card.props.testShell()
+    card.select('gitbash')
+    card.save()
+    await card.settle()
+    assert.equal(held.length, 1, 'the test response is still in flight')
+    held[0]({ ok: true, json: async () => ({ ok: true, stage: 'ran', shell: 'cmd', exitCode: 0, stdout: 'OK' }) })
+    await running
+    card.toggle()
+    assert.ok(!card.text().includes('exit 0'), 'a response for the previous selection is discarded')
+  })
+
+  it('drops a result when the document changes from elsewhere', async () => {
+    const card = await mountCard()
+    card.toggle()
+    await card.props.testShell()
+    assert.ok(card.text().includes('exit 0'))
+    // Another window, or a hand-edited document.
+    card.scope.set('loginShell', true)
+    assert.ok(!card.text().includes('exit 0'), 'the saved configuration moved under the result')
+    assert.ok(card.text().includes('changed since this test ran'))
   })
 
   it('re-reads the host status after a test, so the facts match what ran', async () => {
@@ -758,18 +850,21 @@ describe('staged validation', () => {
     assert.ok(card.text().includes('must be an absolute Linux path'))
   })
 
-  it('blocks a staged login flag on a shell that has no such flag', async () => {
-    const card = await mountCard()
+  it('blocks a login flag the host would refuse, wherever it came from', async () => {
+    const card = await mountCard({ section: { shell: 'cmd', loginShell: true } })
     card.toggle()
-    card.select('gitbash')
-    const checkbox = elements(card.tree, 'input').find(input => input.props.type === 'checkbox')
-    checkbox.props.onChange({ target: { checked: true } })
-    assert.equal(card.saveDisabled(), false, 'bash takes a login flag')
-    // Switching to a dialect with no login flag leaves the staged one standing.
-    // The control that would clear it is not rendered for cmd, so the card
-    // blocks the write rather than sending one the host refuses.
+    assert.equal(card.saveDisabled(), true, 'the host refuses a login flag on cmd')
+    assert.deepEqual(card.scope.calls, [], 'so nothing is written')
+    assert.ok(card.text().includes('takes no login flag'), 'and the field carries the reason')
+  })
+
+  it('does not block a save on a mount root the card is not showing', async () => {
+    // The same dead-end shape as the login flag: a value the user cannot reach
+    // must not be the reason Save is refused.
+    const card = await mountCard({ section: { shell: 'wsl', wslMountRoot: 'mnt' } })
+    card.toggle()
+    assert.equal(card.saveDisabled(), true, 'the field is on screen for WSL, so it is checked')
     card.select('cmd')
-    assert.equal(card.saveDisabled(), true)
-    assert.deepEqual(card.scope.calls, [])
+    assert.equal(card.saveDisabled(), false, 'hidden for cmd, so it cannot block the way out')
   })
 })

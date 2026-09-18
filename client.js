@@ -50,16 +50,27 @@ window.__ModuleLoader__.load({
     const AUTO = 'auto'
 
     /**
-     * The staged text fields and whether an empty draft means "inherit".
+     * The staged text fields: what an empty draft means, and what to say when a
+     * shell change cleared one.
      *
-     * Clearing a path is how a user drops an override, so it stages an `unset`
-     * and the field re-inherits the composition layer. `shell` and `loginShell`
-     * are absent because they always carry a value: unsetting them would fall
-     * back to the composition entry, which is not what a user who picked `cmd`
-     * or unticked a box asked for.
+     * `emptyMeansInherit` distinguishes two meanings of an empty field.
+     * `executable` empty means *no override*, so clearing it writes an explicit
+     * empty — unsetting a value the user never set would leave an inherited path
+     * in force. `wslDistro` and `wslMountRoot` empty means *inherit the configured
+     * default*, so clearing them unsets and the layer below shows through again,
+     * which is what their hints promise.
+     *
+     * `shell` and `loginShell` are absent because they always carry a value:
+     * unsetting them would fall back to the composition entry, which is not what a
+     * user who picked `cmd` or unticked a box asked for.
      */
     const TEXT_FIELDS = [
-      { field: 'executable', label: 'executable', hint: 'executableHint', emptyMeansInherit: true },
+      {
+        field: 'executable',
+        label: 'executable',
+        hint: 'executableHint',
+        emptyMeansInherit: false,
+      },
       { field: 'wslDistro', label: 'wslDistro', hint: 'wslDistroHint', emptyMeansInherit: true },
       { field: 'wslMountRoot', label: 'wslMountRoot', hint: 'wslMountRootHint', emptyMeansInherit: true },
     ]
@@ -98,7 +109,9 @@ window.__ModuleLoader__.load({
       executable: 'Executable path',
       executableHint: 'Leave empty to discover it. Takes effect when you save.',
       clearOverride: 'Clear override',
-      overrideCleared: 'Cleared: this path was set for another shell.',
+      shellChangeCleared: 'Cleared because the shell changed',
+      executableShort: 'executable path',
+      loginShellShort: 'login-shell flag',
       replaceable: 'Replaceable',
       loginShell: 'Run as a login shell',
       loginShellHint: 'Sources your profile scripts on every command. Off by default.',
@@ -150,7 +163,9 @@ window.__ModuleLoader__.load({
       executable: '可执行文件路径',
       executableHint: '留空则自动检测。保存后生效。',
       clearOverride: '清除覆盖',
-      overrideCleared: '已清除：该路径是为另一个 Shell 设置的。',
+      shellChangeCleared: '因切换 Shell 已清除',
+      executableShort: '可执行文件路径',
+      loginShellShort: '登录 Shell 参数',
       replaceable: '可替换',
       loginShell: '以登录 Shell 运行',
       loginShellHint: '每条命令都会加载你的 profile 脚本。默认关闭。',
@@ -351,7 +366,18 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** The revision-fenced ops one save writes, empty when nothing changed. */
+    /**
+     * The revision-fenced ops one save writes, empty when nothing changed.
+     *
+     * Clearing a field is not one thing. `executable` empty means *no override*,
+     * so clearing it writes an explicit empty: unsetting a value the user never
+     * set would leave an inherited path in force and silently restore the very
+     * path they cleared. `wslDistro` and `wslMountRoot` empty means *inherit the
+     * configured default*, so unsetting them is exactly right.
+     * @param draft - the staged selection.
+     * @param stored - the effective values the draft is compared against.
+     * @returns the ops to write.
+     */
     function saveOps(draft, stored) {
       const ops = []
       if (draft.shell !== stored.shell) ops.push({ op: 'set', path: ['shell'], value: draft.shell })
@@ -361,8 +387,13 @@ window.__ModuleLoader__.load({
       for (const { field, emptyMeansInherit } of TEXT_FIELDS) {
         const next = draft[field].trim()
         if (next === stored[field].trim()) continue
-        if (next.length === 0 && emptyMeansInherit) ops.push({ op: 'unset', path: [field] })
-        else ops.push({ op: 'set', path: [field], value: next })
+        if (next.length > 0) {
+          ops.push({ op: 'set', path: [field], value: next })
+          continue
+        }
+        ops.push(emptyMeansInherit
+          ? { op: 'unset', path: [field] }
+          : { op: 'set', path: [field], value: '' })
       }
       return ops
     }
@@ -370,9 +401,11 @@ window.__ModuleLoader__.load({
     /**
      * What a save of this draft could not write.
      *
-     * Each check mirrors a refusal the Host would otherwise raise, so Save can
-     * be blocked with the reason at the field instead of staging a write that
-     * comes back rejected.
+     * Each check mirrors a refusal the Host would otherwise raise, so Save can be
+     * blocked with the reason at the field instead of staging a write that comes
+     * back rejected. A check also has to be one the card can *show*: a failure the
+     * user cannot reach is a disabled Save with no way out, so each one applies
+     * only while its field is on screen.
      * @param draft - the staged selection.
      * @param status - the last status payload, which carries the platform and
      *   the per-shell facts the checks need.
@@ -389,11 +422,15 @@ window.__ModuleLoader__.load({
         && platform !== undefined && !isAbsoluteFor(platform, executable)) {
         failures.executable = 'invalidAbsolute'
       }
-      if (mountRoot.length > 0 && !mountRoot.startsWith('/')) {
+      // Only where the field is rendered: a mount root the card is not showing
+      // cannot be corrected, and the Host validates it when a WSL call is made.
+      if (mountRoot.length > 0 && !mountRoot.startsWith('/') && selected?.supportsDistro === true) {
         failures.wslMountRoot = 'invalidMountRoot'
       }
       // The Host refuses a login flag on a dialect that has no such flag, so a
-      // staged one is blocked here rather than written and rejected there.
+      // staged one is blocked here rather than written and rejected there. The
+      // control stays visible whenever it holds such a value, which is what makes
+      // the failure recoverable instead of a dead end.
       if (draft.loginShell && selected !== undefined && selected.supportsLoginShell !== true) {
         failures.loginShell = 'invalidLoginShell'
       }
@@ -418,17 +455,23 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The staged fields that name *which* shell runs.
+     * The staged fields the saved configuration is made of.
      *
-     * A successful write of any of them makes an earlier "Test shell" result
-     * describe a selection that is no longer in force, so the result is dropped
-     * rather than left on screen looking current.
+     * "Test shell" runs the *saved* selection, so any change to these — from this
+     * card, from another window, or from a hand-edited document — makes a result
+     * already on screen describe a configuration that is no longer in force.
+     * `loginShell` and `wslMountRoot` are in here because they change how and
+     * where the tested command ran, not only which binary ran it.
      */
-    const SELECTION_FIELDS = ['shell', 'executable', 'wslDistro']
+    const SAVED_FIELDS = ['shell', 'executable', 'loginShell', 'wslDistro', 'wslMountRoot']
 
-    /** The settings fields one save writes, for the obsolete-result check. */
-    function touchedSelection(ops) {
-      return ops.some(op => SELECTION_FIELDS.includes(op.path[0]))
+    /**
+     * A value that changes whenever the saved configuration does.
+     * @param values - the effective (or staged) field values.
+     * @returns the signature a test result is tagged with.
+     */
+    function savedSignature(values) {
+      return JSON.stringify(SAVED_FIELDS.map(field => values[field]))
     }
 
     /**
@@ -457,10 +500,12 @@ window.__ModuleLoader__.load({
           stored: draftFrom(undefined),
           dirty: false,
           failures: {},
-          overrideCleared: false,
+          cleared: [],
           snapshot: undefined,
           status: undefined,
           test: undefined,
+          testSignature: undefined,
+          testCleared: false,
         })
         this.dispose = scope.subscribe(() => { this.publish() })
         this.publish()
@@ -476,6 +521,12 @@ window.__ModuleLoader__.load({
         // it can never silently discard staged edits.
         const draft = current.dirty ? current.draft : stored
         const failures = planFailures(draft, current.status)
+        // A pending or displayed test result belongs to the configuration it was
+        // started against. When the saved configuration moves under it, the
+        // result is dropped and any response still in flight is invalidated, so a
+        // slow answer cannot land under a selection it never ran.
+        const stale = current.testSignature !== undefined && current.testSignature !== savedSignature(stored)
+        if (stale) this.testGeneration += 1
         this.store.set({
           ...current,
           available: snapshot.status === 'ready',
@@ -485,27 +536,35 @@ window.__ModuleLoader__.load({
           draft,
           failures,
           dirty: saveOps(draft, stored).length > 0,
+          ...stale ? { test: undefined, testSignature: undefined, testCleared: true } : {},
         })
       }
 
       /**
        * Stage one draft change.
        *
-       * Changing the shell drops a staged executable override: that path was
-       * given for the shell being left, and carrying it to the new selection
-       * would either fail the host's identity check or, worse, be paired with
-       * the new shell's launch arguments. The draft says so rather than
-       * dropping it silently.
+       * Changing the shell drops the launch options that belonged to the shell
+       * being left: an executable path given for it, and a login-shell flag it
+       * does not take. Both would otherwise be carried into the new selection,
+       * where the first fails the host's identity check and the second blocks the
+       * save with a control the new shell does not render. The draft says what it
+       * dropped rather than doing it silently.
        */
       edit(field, value) {
         const current = this.store.getSnapshot()
         if (!current.writable || current.saving) return
         const changedShell = field === 'shell' && value !== current.draft.shell
-        const clearedOverride = changedShell && current.draft.executable.length > 0
+        const next = changedShell ? rowFor(current.status, value) : undefined
+        const cleared = []
+        if (changedShell && current.draft.executable.length > 0) cleared.push('executable')
+        if (changedShell && current.draft.loginShell && next !== undefined && next.supportsLoginShell !== true) {
+          cleared.push('loginShell')
+        }
         const draft = {
           ...current.draft,
           [field]: value,
-          ...clearedOverride ? { executable: '' } : {},
+          ...cleared.includes('executable') ? { executable: '' } : {},
+          ...cleared.includes('loginShell') ? { loginShell: false } : {},
         }
         this.store.set({
           ...current,
@@ -514,7 +573,7 @@ window.__ModuleLoader__.load({
           dirty: saveOps(draft, current.stored).length > 0,
           failed: false,
           failure: undefined,
-          overrideCleared: clearedOverride,
+          cleared,
         })
       }
 
@@ -528,7 +587,7 @@ window.__ModuleLoader__.load({
           failures: {},
           failed: false,
           failure: undefined,
-          overrideCleared: false,
+          cleared: [],
         })
       }
 
@@ -541,12 +600,12 @@ window.__ModuleLoader__.load({
         try {
           await this.scope.mutate(ops, current.snapshot?.revision)
           // The scope's subscription republishes on commit, re-seeding draft
-          // and stored from what the Host accepted.
+          // and stored from what the Host accepted, and dropping a test result
+          // the accepted configuration no longer matches.
           this.store.set({
             ...this.store.getSnapshot(),
             saving: false,
-            overrideCleared: false,
-            ...touchedSelection(ops) ? { test: undefined, testCleared: true } : {},
+            cleared: [],
           })
           await this.refreshStatus()
         } catch (error) {
@@ -587,7 +646,16 @@ window.__ModuleLoader__.load({
       /** Run the host's fixed test command against the saved selection. */
       async testShell() {
         const generation = ++this.testGeneration
-        this.store.set({ ...this.store.getSnapshot(), testing: true, test: undefined, testCleared: false })
+        const current = this.store.getSnapshot()
+        this.store.set({
+          ...current,
+          testing: true,
+          test: undefined,
+          testCleared: false,
+          // The configuration this run describes: a result is only kept while
+          // the saved selection still matches it.
+          testSignature: savedSignature(current.stored),
+        })
         try {
           const response = await fetch(TEST_URL, { method: 'POST', headers: { accept: 'application/json' } })
           const body = await response.json()
@@ -746,7 +814,7 @@ window.__ModuleLoader__.load({
           }),
           h('p', { className: failures[name] === undefined ? 'dsss-hint' : 'dsss-invalid' },
             t(failures[name]
-              ?? (name === 'executable' && state.overrideCleared ? 'overrideCleared' : spec.hint)),
+              ?? spec.hint),
           ),
         )
       }
@@ -818,6 +886,15 @@ window.__ModuleLoader__.load({
                 }),
               ),
               h('div', { className: 'dsss-facts' }, facts),
+              // Said here rather than at the field: a cleared value may belong to
+              // a field the newly selected shell does not even render, and an
+              // explanation the user cannot see is no explanation.
+              state.cleared?.length > 0
+                ? h('p', { className: 'dsss-hint' },
+                  `${t('shellChangeCleared')}: ${state.cleared
+                    .map(cleared => t(cleared === 'loginShell' ? 'loginShellShort' : 'executableShort'))
+                    .join(', ')}`)
+                : null,
               status?.confinementVerified === false
                 ? h('p', { className: 'dsss-hint' }, t('confinementUnverified'))
                 : null,
@@ -825,7 +902,7 @@ window.__ModuleLoader__.load({
 
             textField(TEXT_FIELDS[0]),
 
-            selected?.supportsLoginShell === true
+            selected?.supportsLoginShell === true || draft.loginShell
               ? h('div', { className: 'dsss-field', key: 'loginShell' },
                 h('label', { className: 'dsss-label dsss-check' },
                   h('input', {
