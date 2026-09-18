@@ -80,17 +80,20 @@ guarantee, and this plugin adds no destructive-command detection.
 Stated plainly, because a compatibility claim you cannot check is worse than no
 claim. Every number below is from a run of `pnpm test` in this repository.
 
-**On Windows 10.0.26200, against DSH `0.1.6-alpha.1`:** 228 tests, 227 passing, 1
+**On Windows 10.0.26200, against DSH `0.1.6-alpha.1`:** 242 tests, 241 passing, 1
 skipped (`pwsh` is not installed here).
 
 **On Linux (Ubuntu) and macOS:** the suites are written to run on either platform
-and CI runs them on `ubuntu-latest` and `macos-latest`. Two independent Linux runs
-by a reviewer executed Bash, Zsh, and `sh` through the plugin; that host has no
-usable sandbox backend, so they verified the refusal path rather than filesystem
-confinement. Both runs found host-dependent behavior — test boundaries, Windows
-PATH parsing, a fixture-root check that could not fail, and a Test action that
-ran in the host process's directory — all fixed here and pinned by cases that
-pass on either platform. CI is what confirms them.
+and CI runs them on `ubuntu-latest` and `macos-latest`. Three independent Linux
+runs by a reviewer executed Bash, Zsh, and `sh` through the plugin; that host has
+no usable sandbox backend, so they verified the refusal path rather than
+filesystem confinement. All three found host-dependent behavior — test
+boundaries, Windows PATH parsing, a fixture-root check that could not fail, a Test
+action that ran in the host process's directory, a catalog comparison that
+normalized only one side against a harness list built with the host's own
+separator, and a working-directory *existence* case handed a POSIX fixture path
+under a simulated Windows platform — all fixed here and pinned by cases that pass
+on either platform. CI is what confirms them.
 
 - Every catalog entry's argv, end to end, for `cmd`, Windows PowerShell 5.1, Git
   Bash, and WSL (Ubuntu 22.04) through the real subprocess and sandbox providers.
@@ -170,19 +173,38 @@ cannot silently regress.
 - **`fish` and `zsh` have not been run at all**, on any platform. Their entries
   are catalog rows with dialect `bash`; fish's non-POSIX syntax is documented for
   the model but not exercised. `sh` is run by CI's POSIX lane when installed.
-- **The Web card has been rendered in a browser once, on Windows, in an isolated
-  `DSH_HOME`.** Save, Discard, the dropdown, the facts, Test shell, and the
-  save-during-test sequence were exercised against the running harness: the card
-  listed its options with per-shell facts, the Test action reported
+- **The Web card has been rendered in a real browser twice, on Windows, in
+  isolated `DSH_HOME`s.** Save, Discard, the dropdown, the facts, Test shell, and
+  the save-during-test sequence were exercised against the running harness: the
+  card listed its options with per-shell facts, the Test action reported
   `cmd → exit 0 / DSH-SHELL-SELECT-TEST-OK`, a save persisted `shell: auto` to the
   settings document, and the Test button released itself so a second run
-  completed. That run also found a gap the suite had missed (a staged launch
-  option surviving a switch to Automatic), which is fixed and now covered. What
-  remains unverified: any other platform or browser, and the parts of the card
-  the run did not touch — the override/save-failure paths in a live browser, real
-  pointer interaction (the check drove the UI through the DOM, because Playwright
-  actionability timed out on this dialog), keyboard navigation, and layout at
-  other widths and themes.
+  completed. The first run found a gap the suite had missed — a staged launch
+  option surviving a switch to Automatic — which is fixed and now covered.
+
+  The second run drove the reported sequence end to end: Git Bash saved with an
+  executable override and a login flag, then Automatic chosen in the dropdown.
+  The card described Automatic's own resolution (Windows PowerShell 5.1, its path,
+  version, confinement, and usability), not the saved selection; it cleared the
+  override and the login flag and said so; Save wrote `shell: auto`,
+  `executable: ""`, and `loginShell: false` to the fixture document and collapsed
+  the card; and Test then reported `powershell → exit 0 /
+  DSH-SHELL-SELECT-TEST-OK`. A relative path typed into the executable field was
+  refused with the reason on the field and Save disabled, and an executable path
+  typed under Automatic read as *unknown* rather than naming a shell nothing would
+  run.
+
+  Both runs used a throwaway `DSH_HOME` under the plugin's own `.test-tmp`, a
+  profile whose only dependency is a `link:` to this checkout, and — in the second
+  run — a headless browser launched with its profile directory inside that
+  fixture. Neither run read or wrote the real `~/.dsh` settings, and the installed
+  profile was verified unchanged afterwards. Because the session that ran the
+  second check had no browser-automation tool, the UI was driven over the Chrome
+  DevTools protocol through the DOM: clicks were dispatched programmatically, so
+  real pointer interaction, hover, focus rings, keyboard navigation, and layout at
+  other widths and themes remain unverified, as does any other platform or
+  browser. The first run's browser-automation tool timed out on the settings
+  dialog's actionability checks for the same reason.
 
 ## Execution routes: covered and not covered
 
@@ -285,7 +307,7 @@ Opening it shows:
 - a **dropdown** listing every shell in the platform's catalog, each option
   carrying its own reported version, so an uninstalled shell reads as *not
   found* rather than disappearing from the list. **Automatic**, the default, is
-  the first option, says which shell it currently resolves to, and is always
+  the first option, says which shell the host resolves it to, and is always
   selectable — so a user who picked a specific shell can go back;
 - the selected shell's facts as **separate statements rather than one status
   word**: detected path, version (or, for a shell with no version flag, the
@@ -313,10 +335,18 @@ or pair one shell's binary with another's launch arguments, and the flag would
 block the save with a control the new shell does not even render. Type them again
 after the switch if they still apply.
 
-**Automatic is judged as the shell it resolves to.** It is not a row of its own,
-so a staged launch option is checked against whatever the host reports `auto`
-currently running — otherwise a login flag staged for Git Bash would survive a
-switch to Automatic and be refused by the host on save, with Save still enabled.
+**Automatic is judged as the shell it resolves to, which the host resolves for
+itself.** It is not a row of its own, and it is not the saved selection either:
+the settings may select Git Bash while Automatic — the catalog order, or a POSIX
+`$SHELL` — picks PowerShell. The host resolves Automatic as its own question and
+reports it, and a staged launch option is checked against *that* shell, so a login
+flag staged for Git Bash does not survive a switch to Automatic that lands on
+PowerShell. An executable override changes the answer, because an override naming
+a shell claims that shell; the card therefore asks about two configurations — the
+one the draft carries, and the one choosing Automatic produces, which drops the
+override. A path you type under Automatic is a third configuration the host has
+not resolved yet: the card says **unknown** rather than naming a shell nothing
+would run.
 
 Clearing a field means what that field means. An empty **executable path** is *no
 override*, so clearing it writes an explicit empty and shadows a path that came
@@ -453,7 +483,7 @@ nothing this plugin exercises needs those scripts to run. The prebuilt binaries
 those packages ship are what the real subprocess and sandbox providers use, and
 the integration lane proves they work.
 
-228 tests across twelve suites. Everything disposable lives under an approved
+242 tests across twelve suites. Everything disposable lives under an approved
 scratch root: `<projectRoot>/.test-tmp/<unique-id>/` by default, or
 `DSH_SHELL_SELECT_TEST_TMP` when this checkout has no scratch of its own outside
 the user profile. `test/helpers.mjs` validates the root before creating anything
@@ -505,17 +535,17 @@ entries — so a lane that stops being covered fails rather than going quiet.
 |---|---|
 | `catalog.spec.mjs` | Both platforms' catalogs, argv per dialect, the confinement verdicts, the WSL path translation, the identity guard against a sibling shell's program, and that the catalog names shells rather than paths |
 | `discovery.spec.mjs` | Resolution through the seam, no-fallback-on-invalid-config, the override that names another shell, the failure naming every probed location, and the per-platform working-directory rule |
-| `executor.spec.mjs` | The decision: zero spawn requests for every refusal, no mode downgrade, one immutable decision per call (settings rewritten mid-call included), argv reaching the process per dialect, `auto` selection, concurrent refresh ordering, and the model-facing description |
+| `executor.spec.mjs` | The decision: zero spawn requests for every refusal, no mode downgrade, one immutable decision per call (settings rewritten mid-call included), argv reaching the process per dialect, `auto` selection, `auto` resolved independently of the selection (including under an executable override, and agreeing with what a call runs), concurrent refresh ordering, and the model-facing description |
 | `tool.spec.mjs` | The per-call record: the shell, executable, and working directory come from the call's own decision for foreground and background, an aborted or refused background call never reaches the job registry, and the description names the selected shell |
 | `cmd-command-transport.spec.mjs` | The direct form's measured corruption, the transport carrying quotes/redirection/chaining/Unicode filenames, the `%NAME%` limitation and its `call` opt-in |
 | `integration.spec.mjs` | Real processes on this host's lane: every required and installed shell, real confinement denial or a fail-closed refusal, timeout, cancellation, background read/kill, spaces and Unicode in the working directory, and `auto` |
 | `helpers.spec.mjs` | The fixture rule itself: profile roots are canonical and refused, an approved root is honored, removal is contained and exact, and a simulated platform gets a path shaped for it |
 | `lanes.mjs` | The lane definitions themselves: which shells a platform's lane must cover and which may skip |
 | `platform-lanes.spec.mjs` | The verification boundary itself, asserted so it cannot be overclaimed |
-| `status.spec.mjs` | The separated status facts, probes running confined or not at all, a non-zero probe exit as a failure, the `sh` interpreter probe, the test action's refusal path, and the loopback restriction |
+| `status.spec.mjs` | The separated status facts, Automatic resolved for its own configurations as distinct from the selected row, probes running confined or not at all, a non-zero probe exit as a failure, the `sh` interpreter probe, the test action's refusal path, and the loopback restriction |
 | `settings.spec.mjs` | Persistence across a fresh composition, unrelated edits surviving, a change applying only to later calls |
 | `replacement.spec.mjs` | The guard denying every replaced name and leaving unrelated tools alone |
-| `client.spec.mjs` | The card bundle and its interaction: the slot key, the injected stylesheet and the design tokens it uses, collapsed-by-default disclosure, staging on choose, one revision-fenced save, discard, launch options and overrides cleared on a shell change (and the note that says so), an inherited value shadowed rather than unset, a test result and an in-flight test response dropped when the saved configuration moves, stale-status ordering, boolean-versus-string field values, and the validation that blocks a save the host would refuse while keeping the way out visible |
+| `client.spec.mjs` | The card bundle and its interaction: the slot key, the injected stylesheet and the design tokens it uses, collapsed-by-default disclosure, staging on choose, one revision-fenced save, discard, launch options and overrides cleared on a shell change (and the note that says so), Automatic described by its own resolution rather than by the saved selection, an override the host has not resolved reported as unknown, an inherited value shadowed rather than unset, a test result and an in-flight test response dropped when the saved configuration moves, stale-status ordering, boolean-versus-string field values, and the validation that blocks a save the host would refuse while keeping the way out visible |
 
 ## Known limitations
 
@@ -538,6 +568,13 @@ entries — so a lane that stops being covered fails rather than going quiet.
   would refuse a directory that is valid in the execution world. There, the
   provider that owns the filesystem refuses a missing directory at spawn. It is a
   typo guard, not a security boundary, and it never substitutes another directory.
+- **A path typed under Automatic is not resolved until the selection is saved.**
+  The host resolves Automatic for the configurations it is asked about, and the
+  card asks about the saved one and the one a switch leaves staged; asking about
+  every keystroke would put a resolution request in the typing path. Until then
+  the card reports Automatic as *unknown* for that path instead of naming a shell
+  nothing would run, and the launch-option checks apply to the saved
+  configuration — the one a call uses.
 - **The loopback restriction is on the plugin's own routes**, not on the tool: an
   agent on the same machine reaches `shell` normally.
 - **The identity guard is a pairing check, not executable authentication.** It
